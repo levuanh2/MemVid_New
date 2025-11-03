@@ -1,0 +1,38 @@
+# Web framework
+flask
+flask-cors
+
+# Vector search
+faiss-cpu
+
+# AI model (gọi Ollama)
+requests
+
+# Video & QR encoding
+opencv-python
+qrcode[pil]
+Pillow
+
+# Xử lý dữ liệu
+numpy
+pandas
+
+# PDF & Word processing
+PyMuPDF         # import fitz
+pdfplumber
+python-docx     # xử lý file .docx
+# OCR
+pytesseract
+# QR decoding
+pyzbar
+# Embedding models
+sentence-transformers
+torch
+transformers
+# Ollama client (local LLM)
+ollama
+# Language detection
+langdetect
+
+# Khác (tiện ích)
+tqdm

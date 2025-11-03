@@ -1,0 +1,19 @@
+{
+  "chats": [
+    {
+      "id": 1,
+      "title": "Chat với GPT",
+      "messages": [
+        { "id": 1, "sender": "user", "text": "Xin chào!" },
+        { "id": 2, "sender": "bot", "text": "Chào bạn! Tôi có thể giúp gì?" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Nháp đề tài",
+      "messages": [
+        { "id": 1, "sender": "user", "text": "Ý tưởng về MEMVID" }
+      ]
+    }
+  ]
+}

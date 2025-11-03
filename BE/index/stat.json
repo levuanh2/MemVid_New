@@ -1,0 +1,9 @@
+{
+  "total_chunks": 4,
+  "video_path": "video/memvid_memory.mp4",
+  "index_path": "index/faiss.index",
+  "metadata_path": "index/index.json",
+  "files": [
+    "TIỂU LUẬN AN TOÀN THÔNG TIN.docx"
+  ]
+}
