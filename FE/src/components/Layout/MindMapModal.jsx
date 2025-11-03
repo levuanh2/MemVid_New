@@ -17,6 +17,18 @@ function MindMapContent({ data, onClose }) {
   const [innerNodes, setInnerNodes] = useState([]);
   const [innerEdges, setInnerEdges] = useState([]);
   const [collapsed, setCollapsed] = useState({});
+  const [shapeType, setShapeType] = useState("rectangle");
+
+  const shapeConfig = useMemo(() => {
+    switch (shapeType) {
+      case "circle":
+        return { width: 160, height: 160, innerSize: 120 };
+      case "diamond":
+        return { width: 180, height: 180, innerSize: 130 };
+      default:
+        return { width: 220, height: 110, innerSize: null };
+    }
+  }, [shapeType]);
 
   // Fix: Toggle updater nested, compute newCollapsed sync, no dep loop
   const toggleCollapse = useCallback((id) => {
@@ -52,17 +64,30 @@ function MindMapContent({ data, onClose }) {
       return { nodes: [], edges: [] };
     }
 
+    const nodeWidth = shapeConfig.width;
+    const nodeHeight = shapeConfig.height;
+
     // Build nodes với initial collapsed từ state
     const nodeListWithData = flatData.map((node) => ({
       id: node.id || `node-${Math.random().toString(36).substr(2, 9)}`,
       parent: node.parent,
       title: node.title,
+      width: nodeWidth,
+      height: nodeHeight,
+      style: {
+        width: nodeWidth,
+        height: nodeHeight,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      },
       data: {
         label: node.title,
         hasChildren: flatData.some((child) => child.parent === node.id),
         collapsed: collapsed[node.id] ?? false,  // Initial sync state
         onToggle: () => toggleCollapse(node.id),
         isRoot: !node.parent,
+        shapeType,
       },
       type: 'custom',
       targetPosition: direction === 'RIGHT' ? Position.Left : Position.Top,
@@ -77,7 +102,7 @@ function MindMapContent({ data, onClose }) {
           source: node.parent,
           target: node.id,
           type: 'smoothstep',
-          style: { stroke: '#000000', strokeWidth: 2 },
+          style: { stroke: '#1f2937', strokeWidth: 2.2 },
         });
       }
     });
@@ -87,7 +112,23 @@ function MindMapContent({ data, onClose }) {
     if (!nodeListWithData.find((n) => n.id === rootId)) {
       const rootNode = {
         id: rootId,
-        data: { label: data.title || 'Mind Map', hasChildren: flatData.length > 0, collapsed: false, onToggle: () => { }, isRoot: true },
+        width: nodeWidth,
+        height: nodeHeight,
+        style: {
+          width: nodeWidth,
+          height: nodeHeight,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        },
+        data: {
+          label: data.title || 'Mind Map',
+          hasChildren: flatData.length > 0,
+          collapsed: false,
+          onToggle: () => { },
+          isRoot: true,
+          shapeType,
+        },
         type: 'custom',
         targetPosition: Position.Left,
         sourcePosition: Position.Right,
@@ -101,20 +142,38 @@ function MindMapContent({ data, onClose }) {
       const dummyId1 = 'dummy-1', dummyId2 = 'dummy-2';
       nodeListWithData.push({
         id: dummyId1,
-        data: { label: 'No data - Check sources', hasChildren: false, isRoot: false },
+        width: nodeWidth,
+        height: nodeHeight,
+        style: {
+          width: nodeWidth,
+          height: nodeHeight,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        },
+        data: { label: 'No data - Check sources', hasChildren: false, isRoot: false, shapeType },
         type: 'custom',
         targetPosition: Position.Left,
         sourcePosition: Position.Right,
       });
       nodeListWithData.push({
         id: dummyId2,
-        data: { label: 'Backend errors?', hasChildren: false, isRoot: false },
+        width: nodeWidth,
+        height: nodeHeight,
+        style: {
+          width: nodeWidth,
+          height: nodeHeight,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        },
+        data: { label: 'Backend errors?', hasChildren: false, isRoot: false, shapeType },
         type: 'custom',
         targetPosition: Position.Left,
         sourcePosition: Position.Right,
       });
-      edgeList.push({ id: `e-${rootId}-${dummyId1}`, source: rootId, target: dummyId1, type: 'smoothstep' });
-      edgeList.push({ id: `e-${rootId}-${dummyId2}`, source: rootId, target: dummyId2, type: 'smoothstep' });
+      edgeList.push({ id: `e-${rootId}-${dummyId1}`, source: rootId, target: dummyId1, type: 'smoothstep', style: { stroke: '#1f2937', strokeWidth: 2.2 } });
+      edgeList.push({ id: `e-${rootId}-${dummyId2}`, source: rootId, target: dummyId2, type: 'smoothstep', style: { stroke: '#1f2937', strokeWidth: 2.2 } });
     }
 
     console.log(`Building layout for ${nodeListWithData.length} nodes, ${edgeList.length} edges`);
@@ -134,8 +193,8 @@ function MindMapContent({ data, onClose }) {
       },
       children: nodeListWithData.map((node) => ({
         id: node.id,
-        width: 150,
-        height: 50,
+        width: node.width || nodeWidth,
+        height: node.height || nodeHeight,
       })),
       edges: edgeList.map((edge) => ({
         id: edge.id,
@@ -177,19 +236,19 @@ function MindMapContent({ data, onClose }) {
         levels[depth].push(node);
       });
 
-      const manualNodes = nodeListWithData.map((node, i) => {
+      const manualNodes = nodeListWithData.map((node) => {
         const depthKey = Object.keys(levels).find((d) => levels[d].includes(node)) || 0;
         const depth = parseInt(depthKey);
         const levelIndex = levels[depth].indexOf(node);
         return {
           ...node,
-          position: { x: depth * 250, y: levelIndex * 80 },
+          position: { x: depth * 250, y: levelIndex * (nodeHeight + 40) },
         };
       });
 
       return { nodes: manualNodes, edges: edgeList };
     }
-  }, [collapsed, data.title]);  // Depend collapsed để rebuild initial data
+  }, [collapsed, data.title, shapeConfig, shapeType, toggleCollapse]);  // Depend collapsed để rebuild initial data
 
   useLayoutEffect(() => {
     if (!data?.nodes || data.nodes.length === 0) {
@@ -217,66 +276,169 @@ function MindMapContent({ data, onClose }) {
   const memoizedNodes = useMemo(() => visibleNodes, [visibleNodes]);
   const memoizedEdges = useMemo(() => filteredEdges, [filteredEdges]);
 
-  const nodeTypes = useMemo(() => ({
-    custom: ({ data, id }) => {
-      const { label, hasChildren, collapsed, onToggle, isRoot } = data;
-      const colors = ['#eab308', '#a78bfa', '#4ade80', '#f472b6', '#60a5fa'];
-      const colorIdx = parseInt(id.split('-')[0]) % colors.length || 0;
-      return (
-        <div
-          style={{
-            padding: '6px 12px',
-            borderRadius: 6,
-            background: isRoot ? '#d946ef' : colors[colorIdx],
-            color: '#fff',
-            border: '1px solid #000',
-            fontWeight: 600,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            boxShadow: '0 1px 4px rgba(0,0,0,0.1)',
-            minWidth: 120,
-          }}
-        >
-          <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
-          <span>{label}</span>
-          {hasChildren && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onToggle();
-              }}
+  const nodeTypes = useMemo(() => {
+    const palette = ['#22c55e', '#38bdf8', '#f97316', '#a855f7', '#facc15', '#ec4899', '#14b8a6'];
+    const getColorIndex = (nodeId) => {
+      if (!nodeId) return 0;
+      const hashValue = Array.from(nodeId).reduce((acc, char, idx) => acc + char.charCodeAt(0) * (idx + 1), 0);
+      return Math.abs(hashValue) % palette.length;
+    };
+
+    return {
+      custom: ({ data, id }) => {
+        const { label, hasChildren, collapsed, onToggle, isRoot } = data;
+        const nodeColor = isRoot ? '#6366f1' : palette[getColorIndex(id)];
+
+        const wrapperStyle = {
+          width: shapeConfig.width,
+          height: shapeConfig.height,
+          position: 'relative',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: shapeType === 'rectangle' ? '0' : '6px',
+          overflow: 'visible',
+        };
+
+        const baseTextStyle = {
+          color: '#fff',
+          fontWeight: 600,
+          textAlign: 'center',
+          wordBreak: 'break-word',
+          lineHeight: 1.35,
+          fontSize: '0.95rem',
+        };
+
+        let renderedShape;
+        if (shapeType === 'circle') {
+          const circleSize = Math.min(shapeConfig.innerSize ?? shapeConfig.width - 20, shapeConfig.width - 20);
+          renderedShape = (
+            <div
               style={{
-                position: 'absolute',
-                top: '50%',
-                right: -15,
-                transform: 'translateY(-50%)',
-                border: '1px solid #ccc',
+                width: circleSize,
+                height: circleSize,
                 borderRadius: '50%',
-                width: 30,
-                height: 30,
-                background: '#fff',
-                cursor: 'pointer',
-                fontSize: 14,
-                fontWeight: 'bold',
-                lineHeight: '18px',
-                textAlign: 'center',
-                color: '#000',
+                background: nodeColor,
+                border: '2px solid rgba(15, 23, 42, 0.16)',
+                boxShadow: '0 10px 20px rgba(15, 23, 42, 0.18)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '16px',
               }}
             >
-              {collapsed ? '+' : '-'}
-            </button>
-          )}
-          <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
-        </div>
-      );
-    },
-  }), []);
+              <span style={baseTextStyle}>{label}</span>
+            </div>
+          );
+        } else if (shapeType === 'diamond') {
+          const diamondSize = shapeConfig.innerSize ?? shapeConfig.width - 30;
+          renderedShape = (
+            <div
+              style={{
+                width: diamondSize,
+                height: diamondSize,
+                transform: 'rotate(45deg)',
+                background: nodeColor,
+                borderRadius: 18,
+                border: '2px solid rgba(15, 23, 42, 0.16)',
+                boxShadow: '0 10px 20px rgba(15, 23, 42, 0.18)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <span
+                style={{
+                  ...baseTextStyle,
+                  transform: 'rotate(-45deg)',
+                  width: '70%',
+                  display: 'inline-block',
+                }}
+              >
+                {label}
+              </span>
+            </div>
+          );
+        } else {
+          renderedShape = (
+            <div
+              style={{
+                width: '100%',
+                height: '100%',
+                background: nodeColor,
+                borderRadius: 18,
+                padding: '18px 22px',
+                border: '2px solid rgba(15, 23, 42, 0.16)',
+                boxShadow: '0 10px 20px rgba(15, 23, 42, 0.18)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <span style={baseTextStyle}>{label}</span>
+            </div>
+          );
+        }
+
+        return (
+          <div style={wrapperStyle}>
+            <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
+            {renderedShape}
+            {hasChildren && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggle();
+                }}
+                aria-label={collapsed ? 'Mở rộng nhánh con' : 'Thu gọn nhánh con'}
+                style={{
+                  position: 'absolute',
+                  top: '50%',
+                  right: shapeType === 'rectangle' ? -20 : -26,
+                  transform: 'translateY(-50%)',
+                  border: '1px solid rgba(148, 163, 184, 0.6)',
+                  borderRadius: '9999px',
+                  width: 34,
+                  height: 34,
+                  background: '#fff',
+                  cursor: 'pointer',
+                  fontSize: 16,
+                  fontWeight: 700,
+                  color: '#1e293b',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  boxShadow: '0 4px 12px rgba(15, 23, 42, 0.18)',
+                }}
+              >
+                {collapsed ? '+' : '-'}
+              </button>
+            )}
+            <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
+          </div>
+        );
+      },
+    };
+  }, [shapeConfig, shapeType]);
 
   return (
     <div className="fixed inset-0 bg-white flex flex-col z-50" style={{ height: '100vh' }}>
-      <div className="flex items-center justify-between bg-gray-100 p-3 border-b">
-        <h3 className="text-lg font-semibold">{data?.title || 'Mind Map'}</h3>
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-gray-100 p-3 border-b">
+        <div className="flex items-center gap-4 flex-wrap">
+          <h3 className="text-lg font-semibold">{data?.title || 'Mind Map'}</h3>
+          <label className="flex items-center gap-2 text-sm text-slate-600">
+            <span>Kiểu nút:</span>
+            <select
+              value={shapeType}
+              onChange={(e) => setShapeType(e.target.value)}
+              className="border border-slate-300 rounded px-2 py-1 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400"
+            >
+              <option value="rectangle">Hình chữ nhật</option>
+              <option value="circle">Hình tròn</option>
+              <option value="diamond">Hình thoi</option>
+            </select>
+          </label>
+        </div>
         <button onClick={onClose} className="px-3 py-1 bg-red-500 text-white rounded">Đóng</button>
       </div>
       <div className="flex-1 relative">
