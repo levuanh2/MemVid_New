@@ -1,8 +1,33 @@
 # mindmap_utils.py
 import re
 import json
-import uuid
 from ollama_utils import run_ollama_chat, SLM_MODEL
+
+
+MAX_SEGMENTS_FOR_MINDMAP = 24
+MAX_CHARS_FOR_MINDMAP = 8000
+
+
+def _prepare_mindmap_chunks(chunks: list[str]) -> list[str]:
+    """Clean & limit chunks for prompting while preserving order."""
+    prepared: list[str] = []
+    total_chars = 0
+
+    for chunk in chunks or []:
+        if not chunk:
+            continue
+        normalized = re.sub(r"\s+", " ", str(chunk)).strip()
+        if not normalized:
+            continue
+
+        next_len = total_chars + len(normalized)
+        if prepared and (len(prepared) >= MAX_SEGMENTS_FOR_MINDMAP or next_len > MAX_CHARS_FOR_MINDMAP):
+            break
+
+        prepared.append(normalized)
+        total_chars = next_len
+
+    return prepared
 
 
 def extract_json_tree(raw: str) -> dict:
@@ -47,6 +72,10 @@ def get_nested_mindmap(chunks: list[str], model: str = None) -> dict:
     """
     Gọi SLM để tạo nested mind map JSON có logic chặt chẽ.
     """
+    prepared_chunks = _prepare_mindmap_chunks(chunks)
+    if not prepared_chunks:
+        raise ValueError("Không có dữ liệu nguồn để tạo mindmap")
+
     system_prompt = (
         "Bạn là AI mindmap chuyên nghiệp. Trả về DUY NHẤT JSON tree nested (```json ...```).\n"
         "- Phân tích nội dung để xác định 3-5 chủ đề chính.\n"
@@ -55,7 +84,13 @@ def get_nested_mindmap(chunks: list[str], model: str = None) -> dict:
         "- Tên node ngắn gọn (2-4 từ), tiếng Việt nếu nội dung VI.\n"
         "- Ví dụ JSON: {\"name\":\"Root\",\"children\":[{\"name\":\"Theme1\",\"children\":[{\"name\":\"Sub1\",\"children\":[]}]}]}"
     )
-    user_prompt = "Sinh mindmap từ các đoạn sau:\n\n" + "\n".join(chunks[:6])
+    bullet_block = "\n".join(f"- {item}" for item in prepared_chunks)
+    user_prompt = (
+        "Sinh mindmap liền mạch từ các ý dưới đây (theo đúng thứ tự được cung cấp).\n"
+        "Gom các ý liên quan thành chủ đề chính rồi chia tiếp thành các nhánh phụ logic.\n"
+        "Dữ liệu tham khảo:\n"
+        f"{bullet_block}"
+    )
 
     raw = run_ollama_chat(system_prompt, user_prompt, model=model or SLM_MODEL)
     tree = extract_json_tree(raw)
@@ -99,13 +134,14 @@ def flatten_mindmap(tree) -> list[dict]:
     """
     flat_nodes = []
 
-    def dfs(node, parent=None):
+    def dfs(node, parent=None, index=0):
         if not isinstance(node, dict):
             return
-        node_id = str(uuid.uuid4())
-        flat_nodes.append({"id": node_id, "parent": parent, "title": node.get("name", "")})
-        for child in node.get("children", []):
-            dfs(child, node_id)
+        title = (node.get("name", "") or "").strip() or "Untitled"
+        node_id = "root" if parent is None else f"{parent}-{index}"
+        flat_nodes.append({"id": node_id, "parent": parent, "title": title})
+        for idx, child in enumerate(node.get("children", [])):
+            dfs(child, node_id, idx)
 
     dfs(tree)
     return flat_nodes
@@ -116,11 +152,18 @@ def generate_mindmap_flat(chunks: list[str], model: str = None) -> list[dict]:
     Sinh mindmap dạng phẳng (flat nodes).
     Có fallback sang main branches nếu JSON nested lỗi.
     """
+    prepared_chunks = _prepare_mindmap_chunks(chunks)
+    if not prepared_chunks:
+        return [
+            {"id": "root", "parent": None, "title": "Mind Map"},
+            {"id": "root-0", "parent": "root", "title": "Không có dữ liệu"}
+        ]
+
     try:
-        tree = get_nested_mindmap(chunks, model=model)
+        tree = get_nested_mindmap(prepared_chunks, model=model)
     except Exception as e:
         print(f"⚠️ JSON lỗi trong generate_mindmap: {e} — fallback sang main branches")
-        mains = get_main_branches(chunks, model=model)
+        mains = get_main_branches(prepared_chunks, model=model)
         tree = {"name": "Mind Map", "children": [{"name": m, "children": []} for m in mains]}
 
     return flatten_mindmap(tree)

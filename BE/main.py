@@ -308,18 +308,15 @@ def generate_mindmap():
             # Fallback tree basic để modal không trắng
             flat_nodes = [
                 {"id": "root", "parent": None, "title": root_title},
-                {"id": "dummy1", "parent": "root", "title": "No content available"}
+                {"id": "root-0", "parent": "root", "title": "No content available"}
             ]
         else:
-            # Tóm tắt chunks trước khi tạo mindmap (dùng SLM)
-            summary_prompt = "Tóm tắt ngắn gọn các chunks sau thành 3-5 ý chính logic (chủ đề → mục tiêu → kết quả), tránh liệt kê chi tiết:"
-            summarized = summarize_results(summary_prompt, chunks, model=SLM_MODEL)
-            summarized_chunks = [line.strip() for line in summarized.split('\n') if line.strip()]
-            flat_nodes = generate_mindmap_flat(summarized_chunks)
+            flat_nodes = generate_mindmap_flat(chunks, model=SLM_MODEL)
 
         # Ép root_title nếu cần
-        if flat_nodes and flat_nodes[0].get("title", "") in ("", "Mind Map"):
-            flat_nodes[0]["title"] = root_title
+        if flat_nodes:
+            root_node = next((n for n in flat_nodes if n.get("parent") is None), flat_nodes[0])
+            root_node["title"] = root_title or root_node.get("title") or "Mind Map"
 
         return jsonify({"title": root_title, "nodes": flat_nodes})
 
