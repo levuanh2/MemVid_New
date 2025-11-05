@@ -23,8 +23,6 @@ pdfplumber
 python-docx     # xử lý file .docx
 # OCR
 pytesseract
-# QR decoding
-pyzbar
 # Embedding models
 sentence-transformers
 torch

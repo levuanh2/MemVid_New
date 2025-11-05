@@ -4,7 +4,6 @@ import qrcode
 import numpy as np
 from typing import List
 from datetime import datetime
-from pyzbar.pyzbar import decode
 
 VIDEOS_DIR = 'videos'
 QR_FRAME_RATE = 1
@@ -50,6 +49,7 @@ def save_qr_frames_to_video(frames: List[np.ndarray], prefix: str = 'memory') ->
 
 def decode_video_qr(path: str) -> List[str]:
     cap = cv2.VideoCapture(path)
+    detector = cv2.QRCodeDetector()
     decoded_texts: set = set()  # Use set to avoid duplicates
     idx = 0
 
@@ -57,10 +57,9 @@ def decode_video_qr(path: str) -> List[str]:
         ret, frame = cap.read()
         if not ret:
             break
-        results = decode(frame)
-        if results:
-            text = results[0].data.decode('utf-8')
-            decoded_texts.add(text)  # Decode every frame, dedup
+        text, points, _ = detector.detectAndDecode(frame)
+        if text:
+            decoded_texts.add(text)
         idx += 1
 
     cap.release()
