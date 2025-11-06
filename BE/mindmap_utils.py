@@ -337,6 +337,7 @@ def _generate_coreference_graph(sentences: list[dict], model: str | None) -> dic
         "- clusters nhóm các câu cùng thực thể đồng tham chiếu.",
         "- edges mô tả quan hệ chi phối (ví dụ: cùng thực thể, giải thích, nguyên nhân).",
         "- rootCandidates ưu tiên tối đa 3 câu thể hiện chủ đề trung tâm.",
+        "- Toàn bộ entity, note, relation phải ghi bằng tiếng Việt tự nhiên khi có thể.",
         "Chỉ trả về JSON, không thêm lời giải thích khác.",
     ])
 
@@ -415,6 +416,7 @@ def _generate_mindmap_from_coreference_graph(
         "4) detail (nếu có) <= 20 từ, chứa citation dạng [S1], [S2-S4] thể hiện câu tham chiếu.",
         "5) Tuyệt đối không tạo thông tin ngoài nội dung đã cho, tránh metadata hành chính.",
         "6) Trả về DUY NHẤT block ```json``` dạng {name, detail?, children}.",
+        "7) Tất cả tên node và detail phải bằng tiếng Việt tự nhiên, có thể giữ nguyên thuật ngữ chuyên môn cần thiết.",
     ])
 
     user_prompt = "\n".join([
@@ -658,6 +660,7 @@ def _generate_root_topic(content_segments: list[str], noise_terms: set[str], mod
         "Bạn là chuyên gia tạo sơ đồ tư duy với phương pháp iterative prompting.",
         "Giai đoạn hiện tại: xác định nút gốc duy nhất đại diện cho chủ đề học thuật chính.",
         "BỎ QUA mọi thông tin hành chính (giảng viên, nhận xét, điểm số, ngày tháng, địa điểm).",
+        "Luôn trả lời bằng tiếng Việt, kể cả khi nội dung nguồn pha trộn ngôn ngữ.",
         "Chỉ trả về JSON hợp lệ dạng {\"root\": \"...\", \"alternatives\": [..]} (alternatives tùy chọn)."
     ])
 
@@ -729,6 +732,7 @@ def _expand_leaf_node(
         "Chỉ thêm detail khi nó bổ sung bối cảnh; bỏ field detail nếu không cần.",
         "Nếu không còn nội dung phù hợp, trả về {\"expand\": false, \"children\": []}.",
         "Luôn trả về JSON hợp lệ duy nhất với khóa expand (boolean) và children (list).",
+        "Toàn bộ tên nhánh và detail phải viết bằng tiếng Việt tự nhiên, không dịch sang tiếng Anh.",
     ]
     system_prompt = "\n".join(instructions)
 
@@ -917,6 +921,7 @@ def _expand_tree(tree: dict, bullet_block: str, model: str | None, noise_terms: 
         "- Bảo toàn khung chính nhưng có thể đổi tên cho rõ và bổ sung các nhánh còn thiếu.",
         "- Không thêm thông tin hành chính (tên trường, họ tên, ngày tháng...) trừ khi là ý trọng tâm.",
         "- Không tạo node trùng lặp; mỗi node phải có 'name' và chỉ thêm 'detail' ngắn khi cần.",
+        "- TẤT CẢ tiêu đề và detail trả về phải bằng tiếng Việt, bám sát ngôn ngữ tài liệu.",
         "- Trả về DUY NHẤT một block ```json ...``` với cấu trúc mindmap hoàn chỉnh."
     ])
     user_prompt = "\n".join([
@@ -945,6 +950,7 @@ def _build_mindmap_single_shot(content_segments: list[str], noise_terms: set[str
         "- Đặt root theo chủ đề trọng tâm, không giữ nguyên các tiêu đề hành chính/bìa.",
         "- Phân tích nội dung và xác định số lượng nhánh linh hoạt theo phong cách Google NotebookLM.",
         "- Bỏ qua thông tin hành chính (tên trường, họ tên, ngày tháng, mục chấm điểm...) trừ khi nó là nội dung chính.",
+        "- TẤT CẢ tiêu đề và detail phải bằng tiếng Việt, ưu tiên cùng ngôn ngữ với tài liệu.",
         "- Cấu trúc gợi ý: Root → Chủ đề → Nhánh con → Chi tiết (độ sâu ≤ 4 nếu cần).",
         "- Mỗi node phải có trường name; detail chỉ dùng cho mô tả ngắn (dùng dấu ' thay vì \" khi trích dẫn).",
         "- Không lặp node cùng tên; mỗi nhánh đại diện một ý riêng biệt.",
@@ -1117,6 +1123,7 @@ def _apply_factuality_critic(tree: dict, content_segments: list[str], noise_term
         "- Nếu một nhánh thiếu dẫn chứng, hãy xóa hoặc gộp vào nhánh phù hợp khác.",
         "- Viết citation ngay trong trường detail của nút lá theo định dạng [1], [2-3] tương ứng với chỉ số câu (1-based).",
         "- Không tạo thông tin mới không xuất hiện trong văn bản.",
+        "- Giữ toàn bộ tiêu đề và detail bằng tiếng Việt nhất quán; chỉ giữ nguyên thuật ngữ chuyên ngành khi cần.",
         "Chỉ trả về DUY NHẤT một block JSON hợp lệ cho mind map đã chỉnh sửa (schema {name, detail?, children}).",
     ])
 
@@ -1151,6 +1158,7 @@ def _apply_local_structure_critic(tree: dict, content_segments: list[str], noise
         "- Có thể thêm một lớp con mới nếu cần để đạt tới ý cụ thể, nhưng giữ độ sâu ≤ 4.",
         "- detail (nếu có) phải ngắn gọn ≤ 16 từ và có thể tái sử dụng citation hiện có.",
         "- Không thay đổi ý nghĩa những nhánh đã qua factuality (không được bịa thêm nội dung mới).",
+        "- Bảo đảm mọi nhãn node/detail ở kết quả vẫn bằng tiếng Việt tự nhiên, không quay lại tiếng Anh.",
         "Đầu ra bắt buộc: DUY NHẤT một block JSON hợp lệ với schema {name, detail?, children}.",
     ])
 
@@ -1186,6 +1194,7 @@ def _apply_global_structure_critic(tree: dict, content_segments: list[str], nois
         "- Có thể đổi tên node cấp 1 cho rõ ràng hoặc tái phân bổ nhánh con, nhưng không được thêm nội dung ngoài văn bản.",
         "- Nếu tồn tại nhánh riêng lẻ yếu (ít con, trùng chủ đề), hãy hợp nhất vào nhánh phù hợp hơn.",
         "- Giữ nguyên citation trong detail nếu đã có.",
+        "- Kết quả cuối cùng phải dùng tiếng Việt tự nhiên cho mọi tiêu đề, detail, kể cả khi tài liệu gốc chứa tiếng Anh.",
         "Đầu ra bắt buộc: DUY NHẤT một block JSON hợp lệ (schema {name, detail?, children}).",
     ])
 
