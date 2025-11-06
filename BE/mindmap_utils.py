@@ -13,6 +13,7 @@ MAX_EXPANSION_CALLS = 18
 MIN_ROOT_CHILDREN = 4
 MIN_INNER_CHILDREN = 2
 CONTEXT_SEGMENTS_PER_NODE = 8
+CRITIC_SEGMENTS = 12
 
 ADMIN_SKIP_PATTERNS = [
     r"\bnhận\s*xét\b",
@@ -681,6 +682,45 @@ def _build_mindmap_iterative(prepared_chunks: list[str], model: str | None) -> d
     return sanitized
 
 
+def _apply_mindmap_critics(tree: dict, content_segments: list[str], model: str | None) -> dict:
+    if not tree or not isinstance(tree, dict):
+        return tree
+    if not tree.get("children"):
+        return tree
+
+    sample_segments = (content_segments or [])[:CRITIC_SEGMENTS]
+    context_block = "\n".join(f"- {item}" for item in sample_segments) if sample_segments else "-"
+    tree_dump = json.dumps(tree, ensure_ascii=False, indent=2)
+
+    system_prompt = "\n".join([
+        "Bạn là bộ chỉ trích (critic) sơ đồ tư duy sử dụng kỹ thuật iterative prompting.",
+        "Nhiệm vụ: đánh giá và cải thiện mindmap theo 3 góc độ: factuality, local structure, global structure.",
+        "- Factuality: giữ lại các nhánh chỉ khi được hỗ trợ bởi nội dung đã cho; nếu thiếu bằng chứng hãy gỡ bỏ hoặc hợp nhất.",
+        "- Local structure: mỗi đường dẫn root→leaf phải kết thúc ở một ý cụ thể/khái niệm rõ ràng, không dừng ở tiêu đề chung chung.",
+        "- Global structure: mindmap phải cân đối 4-7 nhánh cấp 1 (linh hoạt), phản ánh chuẩn mục lục (ToC) hợp lý của tài liệu.",
+        "Tuyệt đối loại bỏ thông tin hành chính (giảng viên, điểm, ngày tháng, chữ ký…).",
+        "Đầu ra: DUY NHẤT một block JSON hợp lệ cho mindmap đã chỉnh sửa (giữ schema {name, detail?, children?}).",
+    ])
+
+    user_prompt = "\n".join([
+        "Mindmap hiện tại (cần rà soát):",
+        "```json",
+        tree_dump,
+        "```",
+        "Văn bản tham chiếu (trích đoạn đại diện):",
+        context_block,
+        "Yêu cầu: tinh chỉnh mindmap theo tiêu chí trên; nếu đã tối ưu thì trả về bản không đổi nhưng vẫn phải là JSON hợp lệ.",
+    ])
+
+    try:
+        raw = run_ollama_chat(system_prompt, user_prompt, model=model or SLM_MODEL)
+        refined = extract_json_tree(raw)
+        return _sanitize_tree(refined)
+    except Exception as exc:
+        print(f"⚠️ Mindmap critics bỏ qua do lỗi: {exc}")
+        return tree
+
+
 def get_nested_mindmap(chunks: list[str], model: str = None) -> dict:
     """Sinh mindmap nested với iterative prompting, fallback single-shot."""
     prepared_chunks = _prepare_mindmap_chunks(chunks)
@@ -694,7 +734,7 @@ def get_nested_mindmap(chunks: list[str], model: str = None) -> dict:
         try:
             tree = builder(prepared_chunks, model)
             if tree and tree.get("children"):
-                return tree
+                return _apply_mindmap_critics(tree, prepared_chunks, model)
         except Exception as exc:
             print(f"⚠️ Mindmap builder {builder.__name__} failed: {exc}")
             last_error = exc
