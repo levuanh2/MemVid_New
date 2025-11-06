@@ -2,6 +2,8 @@ import os
 import unicodedata
 import json
 import re
+import uuid
+from datetime import datetime
 from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -9,7 +11,7 @@ from flask_cors import CORS
 from ingest_utils import extract_text, split_text
 from video_utils import generate_qr_frames, save_qr_frames_to_video
 from faiss_utils import append_to_index, search_index, delete_source_from_index, MODEL_NAME
-from ollama_utils import summarize_whole_document, summarize_results,SLM_MODEL
+from ollama_utils import summarize_whole_document, summarize_results, SLM_MODEL
 from mindmap_utils import get_main_branches, generate_mindmap_flat
 
 app = Flask(__name__)
@@ -21,8 +23,10 @@ CORS(
 )
 
 
+BASE_DIR = Path(__file__).resolve().parent
 VIDEOS_DIR = 'videos'
 INPUT_DIR = 'input_docs'
+MINDMAPS_PATH = BASE_DIR / 'mindmaps.json'
 os.makedirs(INPUT_DIR, exist_ok=True)
 os.makedirs(VIDEOS_DIR, exist_ok=True)
 
@@ -30,6 +34,48 @@ os.makedirs(VIDEOS_DIR, exist_ok=True)
 @app.get('/')
 def home():
     return 'MemvidX API is running.'
+
+
+def _load_mindmaps() -> list[dict]:
+    if not MINDMAPS_PATH.exists():
+        return []
+    try:
+        with open(MINDMAPS_PATH, encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except Exception as exc:
+        print(f"⚠️ Không thể đọc mindmaps.json: {exc}")
+    return []
+
+
+def _save_mindmaps(records: list[dict]) -> None:
+    try:
+        tmp_path = MINDMAPS_PATH.with_suffix('.tmp')
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(records, f, ensure_ascii=False, indent=2)
+        tmp_path.replace(MINDMAPS_PATH)
+    except Exception as exc:
+        print(f"⚠️ Không thể lưu mindmaps.json: {exc}")
+
+
+def _append_mindmap(record: dict) -> None:
+    records = _load_mindmaps()
+    records.insert(0, record)
+    _save_mindmaps(records)
+
+
+def _mindmap_response(record: dict) -> dict:
+    nodes = record.get("nodes")
+    if not isinstance(nodes, list):
+        nodes = []
+    return {
+        "id": record.get("id"),
+        "title": record.get("title"),
+        "nodes": nodes,
+        "sources": record.get("sources", []),
+        "createdAt": record.get("createdAt"),
+    }
 
 
 # -------------------------
@@ -318,11 +364,37 @@ def generate_mindmap():
             root_node = next((n for n in flat_nodes if n.get("parent") is None), flat_nodes[0])
             root_node["title"] = root_title or root_node.get("title") or "Mind Map"
 
-        return jsonify({"title": root_title, "nodes": flat_nodes})
+        mindmap_record = {
+            "id": str(uuid.uuid4()),
+            "title": root_title,
+            "nodes": flat_nodes,
+            "sources": sources,
+            "createdAt": datetime.utcnow().isoformat() + "Z",
+        }
+
+        _append_mindmap(mindmap_record)
+
+        return jsonify(_mindmap_response(mindmap_record))
 
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.get('/mindmaps')
+def list_mindmaps():
+    records = _load_mindmaps()
+    return jsonify({"mindmaps": [_mindmap_response(r) for r in records]})
+
+
+@app.delete('/mindmaps/<string:mindmap_id>')
+def delete_mindmap(mindmap_id: str):
+    records = _load_mindmaps()
+    new_records = [r for r in records if r.get("id") != mindmap_id]
+    if len(new_records) == len(records):
+        return jsonify({"error": "Mind map not found"}), 404
+    _save_mindmaps(new_records)
+    return jsonify({"message": "Deleted"})
 
 
 if __name__ == '__main__':
