@@ -25,6 +25,12 @@ MIN_INNER_CHILDREN = 2
 CONTEXT_SEGMENTS_PER_NODE = 8
 CRITIC_SEGMENTS = 12
 
+# CMGN (Coreference-Guided Mind-Map Generation) helpers
+CORE_GRAPH_SENTENCE_LIMIT = 48
+CORE_GRAPH_SENTENCE_MAX_CHARS = 280
+CORE_GRAPH_EDGE_LIMIT = 64
+CORE_GRAPH_CLUSTER_LIMIT = 24
+
 def _is_noise_topic(name: str, noise_terms: set[str] | None = None) -> bool:
     if not name:
         return True
@@ -158,6 +164,267 @@ def _insert_missing_commas(body: str) -> str:
         i += 1
 
     return "".join(chars)
+
+
+def _extract_sentences_from_segments(segments: list[str], limit: int = CORE_GRAPH_SENTENCE_LIMIT) -> list[dict]:
+    if not segments:
+        return []
+
+    joined = " ".join(str(seg).strip() for seg in segments if seg).strip()
+    if not joined:
+        return []
+
+    # Split sentences; include Vietnamese punctuation.
+    raw_sentences = re.split(r"(?<=[\.!?。？！])\s+", joined)
+    sentences: list[dict] = []
+    seen: set[str] = set()
+
+    for idx, sentence in enumerate(raw_sentences, start=1):
+        cleaned = re.sub(r"\s+", " ", sentence).strip()
+        if not cleaned:
+            continue
+        if cleaned.lower() in seen:
+            continue
+        seen.add(cleaned.lower())
+        sentences.append({
+            "id": f"S{len(sentences) + 1}",
+            "text": cleaned[:CORE_GRAPH_SENTENCE_MAX_CHARS].strip()
+        })
+        if len(sentences) >= limit:
+            break
+
+    return sentences
+
+
+def _sanitize_coreference_graph(obj, default_sentences: list[dict]) -> dict:
+    if not isinstance(obj, dict):
+        raise ValueError("Coreference graph không phải JSON object")
+
+    sentences_input = default_sentences or []
+    by_id = {item.get("id"): item.get("text", "") for item in sentences_input if item.get("id")}
+
+    sanitized_sentences: list[dict] = []
+    provided_sentences = obj.get("sentences")
+    if isinstance(provided_sentences, list) and provided_sentences:
+        for item in provided_sentences:
+            if not isinstance(item, dict):
+                continue
+            sid = str(item.get("id") or item.get("sentenceId") or "").strip()
+            text = str(item.get("text") or "").strip()
+            if not sid:
+                continue
+            if not text and sid in by_id:
+                text = by_id[sid]
+            if not text:
+                continue
+            entities = item.get("entities")
+            if not isinstance(entities, list):
+                entities = []
+            entities = [str(e).strip() for e in entities if e]
+            importance = item.get("importance")
+            try:
+                importance_val = float(importance)
+            except (TypeError, ValueError):
+                importance_val = None
+            sanitized_sentences.append({
+                "id": sid,
+                "text": text,
+                "entities": entities,
+                "importance": importance_val,
+            })
+            by_id[sid] = text
+
+    if not sanitized_sentences:
+        sanitized_sentences = []
+        for item in sentences_input:
+            sid = item.get("id")
+            if not sid:
+                continue
+            sanitized_sentences.append({
+                "id": sid,
+                "text": item.get("text", ""),
+                "entities": [],
+                "importance": None,
+            })
+
+    valid_ids = {item["id"] for item in sanitized_sentences if item.get("id")}
+
+    sanitized_clusters: list[dict] = []
+    for cluster in obj.get("clusters", []) or []:
+        if not isinstance(cluster, dict):
+            continue
+        entity = str(cluster.get("entity") or cluster.get("label") or "").strip()
+        mentions = cluster.get("mentions") or cluster.get("sentenceIds") or cluster.get("nodes")
+        if not isinstance(mentions, list):
+            continue
+        filtered_mentions = []
+        for mention in mentions:
+            mention_id = str(mention).strip()
+            if mention_id in valid_ids and mention_id not in filtered_mentions:
+                filtered_mentions.append(mention_id)
+        if not filtered_mentions:
+            continue
+        note = str(cluster.get("note") or cluster.get("description") or "").strip()
+        sanitized_clusters.append({
+            "entity": entity or ", ".join(filtered_mentions[:2]),
+            "mentions": filtered_mentions,
+            "note": note,
+        })
+        if len(sanitized_clusters) >= CORE_GRAPH_CLUSTER_LIMIT:
+            break
+
+    sanitized_edges: list[dict] = []
+    for edge in obj.get("edges", []) or []:
+        if not isinstance(edge, dict):
+            continue
+        source = str(edge.get("source") or edge.get("from") or edge.get("start") or "").strip()
+        target = str(edge.get("target") or edge.get("to") or edge.get("end") or "").strip()
+        if source not in valid_ids or target not in valid_ids or source == target:
+            continue
+        relation = str(edge.get("relation") or edge.get("reason") or edge.get("label") or "").strip()
+        sanitized_edges.append({
+            "source": source,
+            "target": target,
+            "relation": relation,
+        })
+        if len(sanitized_edges) >= CORE_GRAPH_EDGE_LIMIT:
+            break
+
+    root_candidates = obj.get("rootCandidates") or obj.get("roots") or obj.get("focus")
+    sanitized_roots: list[str] = []
+    if isinstance(root_candidates, list):
+        for rc in root_candidates:
+            rc_id = str(rc).strip()
+            if rc_id in valid_ids and rc_id not in sanitized_roots:
+                sanitized_roots.append(rc_id)
+
+    if not sanitized_roots and sanitized_sentences:
+        sanitized_roots.append(sanitized_sentences[0]["id"])
+
+    return {
+        "sentences": sanitized_sentences,
+        "clusters": sanitized_clusters,
+        "edges": sanitized_edges,
+        "rootCandidates": sanitized_roots,
+    }
+
+
+def _generate_coreference_graph(sentences: list[dict], model: str | None) -> dict:
+    if not sentences:
+        raise ValueError("Không có câu để dựng đồ thị coreference")
+
+    listing = "\n".join(f"{item['id']}: {item['text']}" for item in sentences)
+    system_prompt = "\n".join([
+        "Bạn là bộ trích xuất Coreference Graph cho mạng CMGN.",
+        "Nhiệm vụ: dựa trên các câu đã đánh số, hãy xác định thực thể được nhắc lại và cấu trúc liên kết logic.",
+        "Trả về DUY NHẤT một block ```json``` với cấu trúc:",
+        "{",
+        "  \"sentences\": [{\"id\": \"S1\", \"text\": \"...\", \"entities\": [], \"importance\": 0.8}],",
+        "  \"clusters\": [{\"entity\": \"...\", \"mentions\": [\"S1\", \"S3\"], \"note\": \"...\"}],",
+        "  \"edges\": [{\"source\": \"S1\", \"target\": \"S3\", \"relation\": \"share entity X\"}],",
+        "  \"rootCandidates\": [\"S1\", \"S2\"]",
+        "}",
+        "Ghi chú:",
+        "- Giữ nguyên ID câu như đã cho (S1, S2, ...).",
+        "- entities là danh sách ngắn các thực thể hoặc khái niệm chính xuất hiện trong câu.",
+        "- clusters nhóm các câu cùng thực thể đồng tham chiếu.",
+        "- edges mô tả quan hệ chi phối (ví dụ: cùng thực thể, giải thích, nguyên nhân).",
+        "- rootCandidates ưu tiên tối đa 3 câu thể hiện chủ đề trung tâm.",
+        "Chỉ trả về JSON, không thêm lời giải thích khác.",
+    ])
+
+    user_prompt = "\n".join([
+        "Các câu từ tài liệu (giữ nguyên ID):",
+        listing,
+        "Hãy dựng đồ thị tham chiếu đồng ngữ theo hướng dẫn CMGN.",
+    ])
+
+    raw = run_ollama_chat(system_prompt, user_prompt, model=model or SLM_MODEL)
+    graph_obj = extract_json_tree(raw)
+    return _sanitize_coreference_graph(graph_obj, sentences)
+
+
+def _summarize_coreference_graph(graph: dict) -> str:
+    if not isinstance(graph, dict):
+        return "-"
+
+    lines: list[str] = []
+    sentences = graph.get("sentences", []) or []
+    if sentences:
+        lines.append("Câu & thực thể:")
+        for sentence in sentences:
+            sent_id = sentence.get("id")
+            text = sentence.get("text", "")
+            entities = ", ".join(sentence.get("entities") or [])
+            if entities:
+                lines.append(f"- {sent_id}: {text} (entities: {entities})")
+            else:
+                lines.append(f"- {sent_id}: {text}")
+
+    clusters = graph.get("clusters", []) or []
+    if clusters:
+        lines.append("\nCụm đồng tham chiếu:")
+        for cluster in clusters:
+            entity = cluster.get("entity", "")
+            mentions = ", ".join(cluster.get("mentions") or [])
+            note = cluster.get("note")
+            if note:
+                lines.append(f"- {entity}: {mentions} ({note})")
+            else:
+                lines.append(f"- {entity}: {mentions}")
+
+    edges = graph.get("edges", []) or []
+    if edges:
+        lines.append("\nQuan hệ chính:")
+        for edge in edges:
+            rel = edge.get("relation") or "liên kết"
+            lines.append(f"- {edge.get('source')} → {edge.get('target')}: {rel}")
+
+    roots = graph.get("rootCandidates", []) or []
+    if roots:
+        lines.append("\nGợi ý root: " + ", ".join(roots))
+
+    return "\n".join(lines) if lines else "-"
+
+
+def _generate_mindmap_from_coreference_graph(
+    graph: dict,
+    content_segments: list[str],
+    noise_terms: set[str],
+    model: str | None,
+) -> dict:
+    summary = _summarize_coreference_graph(graph)
+    bullet_block = "\n".join(f"- {seg}" for seg in content_segments[:MAX_SEGMENTS_FOR_MINDMAP])
+
+    root_hint = ", ".join(graph.get("rootCandidates", []) or [])
+
+    system_prompt = "\n".join([
+        "Bạn là Coreference-Guided Mind-Map Generation Network (CMGN).",
+        "Sử dụng đồ thị tham chiếu đồng ngữ đã cho để tạo mindmap logic, giữ đúng JSON hợp lệ.",
+        "Nguyên tắc:",
+        "1) Root dựa trên các câu rootCandidates (ưu tiên câu chứa chủ đề trung tâm).",
+        "2) Các nhánh cấp 1 gộp theo cụm coreference hoặc quan hệ ngữ nghĩa dài hạn.",
+        "3) Các nhánh con triển khai chi tiết dựa trên câu liên kết qua edges và clusters.",
+        "4) detail (nếu có) <= 20 từ, chứa citation dạng [S1], [S2-S4] thể hiện câu tham chiếu.",
+        "5) Tuyệt đối không tạo thông tin ngoài nội dung đã cho, tránh metadata hành chính.",
+        "6) Trả về DUY NHẤT block ```json``` dạng {name, detail?, children}.",
+    ])
+
+    user_prompt = "\n".join([
+        "Thông tin nguồn (đã lọc):",
+        bullet_block or "-",
+        "\nĐồ thị coreference (CMGN):",
+        summary,
+        "\nGợi ý root candidates: " + (root_hint or "(không)"),
+        "Hãy xuất mindmap hoàn chỉnh, cân đối 4-7 nhánh cấp 1 nếu có đủ nội dung.",
+    ])
+
+    raw = run_ollama_chat(system_prompt, user_prompt, model=model or SLM_MODEL)
+    tree_obj = extract_json_tree(raw)
+    sanitized_tree = _sanitize_tree(tree_obj, noise_terms)
+    if not sanitized_tree.get("children"):
+        raise ValueError("Mindmap CMGN rỗng")
+    return sanitized_tree
 
 
 def _context_for_path(path: list[str], content_segments: list[str], limit: int = CONTEXT_SEGMENTS_PER_NODE) -> list[str]:
@@ -1014,3 +1281,41 @@ def generate_mindmap_flat(chunks: list[str], model: str = None) -> list[dict]:
         tree = {"name": "Mind Map", "children": [{"name": m, "children": []} for m in mains]}
 
     return flatten_mindmap(tree)
+
+
+def generate_mindmap_cmgn(chunks: list[str], model: str = None) -> list[dict]:
+    """Sinh mindmap theo phương pháp CMGN (Coreference-Guided)."""
+    prepared_chunks = _prepare_mindmap_chunks(chunks)
+    if not prepared_chunks:
+        return [
+            {"id": "root", "parent": None, "title": "Mind Map"},
+            {"id": "root-0", "parent": "root", "title": "Không có dữ liệu"}
+        ]
+
+    noise_terms = _detect_noise_terms(prepared_chunks, model)
+    filtered_chunks = _filter_segments_by_noise(prepared_chunks, noise_terms) or prepared_chunks
+
+    sentences = _extract_sentences_from_segments(filtered_chunks)
+    if not sentences:
+        print("⚠️ CMGN: không tạo được danh sách câu, fallback sang generate_mindmap_flat")
+        return generate_mindmap_flat(filtered_chunks, model=model)
+
+    try:
+        coref_graph = _generate_coreference_graph(sentences, model)
+    except Exception as exc:
+        print(f"⚠️ CMGN: lỗi dựng coreference graph ({exc}), fallback sang generate_mindmap_flat")
+        return generate_mindmap_flat(filtered_chunks, model=model)
+
+    try:
+        tree = _generate_mindmap_from_coreference_graph(coref_graph, filtered_chunks, noise_terms, model)
+    except Exception as exc:
+        print(f"⚠️ CMGN: lỗi sinh mindmap từ graph ({exc}), fallback nested builder")
+        try:
+            tree = get_nested_mindmap(filtered_chunks, model=model)
+        except Exception as nested_exc:
+            print(f"⚠️ CMGN fallback nested cũng lỗi: {nested_exc}")
+            mains = get_main_branches(filtered_chunks, model=model)
+            tree = {"name": "Mind Map", "children": [{"name": m, "children": []} for m in mains]}
+
+    refined_tree = _apply_mindmap_critics(tree, filtered_chunks, noise_terms, model)
+    return flatten_mindmap(refined_tree)

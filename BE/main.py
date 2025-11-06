@@ -12,7 +12,7 @@ from ingest_utils import extract_text, split_text
 from video_utils import generate_qr_frames, save_qr_frames_to_video
 from faiss_utils import append_to_index, search_index, delete_source_from_index, MODEL_NAME
 from ollama_utils import summarize_whole_document, summarize_results, SLM_MODEL
-from mindmap_utils import get_main_branches, generate_mindmap_flat
+from mindmap_utils import get_main_branches, generate_mindmap_flat, generate_mindmap_cmgn
 
 app = Flask(__name__)
 CORS(
@@ -75,6 +75,7 @@ def _mindmap_response(record: dict) -> dict:
         "nodes": nodes,
         "sources": record.get("sources", []),
         "createdAt": record.get("createdAt"),
+        "strategy": record.get("strategy") or "iterative",
     }
 
 
@@ -332,6 +333,8 @@ def generate_mindmap():
         if not sources:
             return jsonify({"error": "No sources selected"}), 400
 
+        strategy_requested = (data.get("strategy") or data.get("mode") or data.get("method") or "iterative").strip().lower()
+
         root_title = Path(sources[0]).stem if sources else "Mind Map"
 
         with open("index/index.json", encoding="utf-8") as f:
@@ -356,8 +359,19 @@ def generate_mindmap():
                 {"id": "root", "parent": None, "title": root_title},
                 {"id": "root-0", "parent": "root", "title": "No content available"}
             ]
+            strategy_used = strategy_requested if strategy_requested in {"cmgn", "semantic", "coreference"} else "iterative"
         else:
-            flat_nodes = generate_mindmap_flat(chunks, model=SLM_MODEL)
+            if strategy_requested in {"cmgn", "semantic", "coreference"}:
+                try:
+                    flat_nodes = generate_mindmap_cmgn(chunks, model=SLM_MODEL)
+                    strategy_used = "cmgn"
+                except Exception as exc:
+                    print(f"⚠️ generate_mindmap: CMGN strategy lỗi ({exc}), fallback iterative")
+                    flat_nodes = generate_mindmap_flat(chunks, model=SLM_MODEL)
+                    strategy_used = "iterative"
+            else:
+                flat_nodes = generate_mindmap_flat(chunks, model=SLM_MODEL)
+                strategy_used = "iterative"
 
         # Ép root_title nếu cần
         if flat_nodes:
@@ -370,6 +384,7 @@ def generate_mindmap():
             "nodes": flat_nodes,
             "sources": sources,
             "createdAt": datetime.utcnow().isoformat() + "Z",
+            "strategy": strategy_used,
         }
 
         _append_mindmap(mindmap_record)
