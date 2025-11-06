@@ -925,13 +925,13 @@ def _expand_tree(tree: dict, bullet_block: str, model: str | None, noise_terms: 
         "- Trả về DUY NHẤT một block ```json ...``` với cấu trúc mindmap hoàn chỉnh."
     ])
     user_prompt = "\n".join([
-        "Mindmap hiện tại:",
+        "Mindmap hiện tại (JSON gốc):",
         "```json",
         current,
         "```",
         "Các ý liệu chi tiết (đã lọc theo nội dung):",
         bullet_block,
-        "Hãy trả về mindmap đã mở rộng theo phong cách NotebookLM trong block ```json``` duy nhất."
+        "Hãy trả về mindmap đã mở rộng theo phong cách NotebookLM trong block ```json``` duy nhất, tất cả nhãn/detail bằng tiếng Việt."
     ])
 
 
@@ -962,6 +962,7 @@ def _build_mindmap_single_shot(content_segments: list[str], noise_terms: set[str
         "Sinh mindmap phong cách NotebookLM từ các ý dưới đây, giữ đúng trình tự logic.",
         "Gom nhóm các ý liên quan thành chủ đề lớn rồi phân rã thành nhánh phụ và chi tiết rõ ràng.",
         "Bỏ qua phần bìa, tiêu đề hành chính, họ tên, chữ ký, ngày tháng nếu không liên quan nội dung.",
+        "BẮT BUỘC dùng tiếng Việt tự nhiên cho mọi tiêu đề và detail (giữ thuật ngữ chuyên môn khi cần).",
         "Dữ liệu tham khảo:",
         bullet_block
     ])
@@ -1114,9 +1115,9 @@ def _run_critic(system_prompt: str, user_prompt: str, noise_terms: set[str] | No
             system_prompt_current += (
                 "\nLưu ý: phản hồi trước không phải JSON hợp lệ ("
                 + str(last_error)
-                + "). Chỉ trả về duy nhất block ```json``` với schema {name, detail?, children}."
+                + "). Chỉ trả về duy nhất block ```json``` với schema {name, detail?, children} và toàn bộ nội dung bằng tiếng Việt."
             )
-            user_prompt_current += "\n\n⚠️ JSON lần trước lỗi, hãy trả về đúng block ```json``` duy nhất cho mindmap."
+            user_prompt_current += "\n\n⚠️ JSON lần trước lỗi, hãy trả về đúng block ```json``` duy nhất cho mindmap (tiếng Việt 100%)."
 
         raw = run_ollama_chat(system_prompt_current, user_prompt_current, model=model or SLM_MODEL)
         try:
