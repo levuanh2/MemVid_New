@@ -30,6 +30,40 @@ def _prepare_mindmap_chunks(chunks: list[str]) -> list[str]:
     return prepared
 
 
+def _escape_inner_quotes(body: str) -> str:
+    """Best-effort escape for unescaped quotes inside JSON string values."""
+    result: list[str] = []
+    inside_string = False
+    escape = False
+    closers = {",", "}", "]", " ", "\n", "\r", "\t", ""}
+    length = len(body)
+
+    for idx, ch in enumerate(body):
+        next_char = body[idx + 1] if idx + 1 < length else ""
+
+        if ch == "\"" and not escape:
+            if inside_string:
+                if next_char in closers:
+                    inside_string = False
+                    result.append(ch)
+                else:
+                    result.append("\\\"")
+                continue
+            else:
+                inside_string = True
+                result.append(ch)
+                continue
+
+        if ch == "\\" and not escape:
+            escape = True
+        else:
+            escape = False
+
+        result.append(ch)
+
+    return "".join(result)
+
+
 def extract_json_tree(raw: str) -> dict:
     """
     Tách khối JSON tree nested từ response.
@@ -53,7 +87,14 @@ def extract_json_tree(raw: str) -> dict:
     try:
         return json.loads(body)
     except json.JSONDecodeError:
-        # Nếu fail thì clean comment, markdown, bullet
+        # Thử escape các dấu ngoặc kép chưa được escape trong nội dung
+        escaped_body = _escape_inner_quotes(body)
+        try:
+            return json.loads(escaped_body)
+        except json.JSONDecodeError:
+            body = escaped_body
+
+        # Nếu vẫn fail thì clean comment, markdown, bullet
         lines = []
         for line in body.splitlines():
             s = line.strip()
@@ -77,12 +118,13 @@ def get_nested_mindmap(chunks: list[str], model: str = None) -> dict:
         raise ValueError("Không có dữ liệu nguồn để tạo mindmap")
 
     system_prompt = (
-        "Bạn là AI mindmap chuyên nghiệp. Trả về DUY NHẤT JSON tree nested (```json ...```).\n"
-        "- Phân tích nội dung để xác định 3-5 chủ đề chính.\n"
-        "- Cấu trúc: Root → Theme → Sub → Detail (depth ≤ 3).\n"
-        "- Mỗi level có 2-4 children, tránh liệt kê dàn trải.\n"
-        "- Tên node ngắn gọn (2-4 từ), tiếng Việt nếu nội dung VI.\n"
-        "- Ví dụ JSON: {\"name\":\"Root\",\"children\":[{\"name\":\"Theme1\",\"children\":[{\"name\":\"Sub1\",\"children\":[]}]}]}"
+        "Bạn là AI mindmap chuyên nghiệp. Trả về DUY NHẤT JSON tree nested (```json ...```), bảo đảm JSON hợp lệ.\n"
+        "- Phân tích nội dung và tự xác định số lượng nhánh phù hợp (không cố định).\n"
+        "- Cấu trúc gợi ý: Root → Chủ đề → Nhánh con → Chi tiết (độ sâu ≤ 4 nếu cần).\n"
+        "- node bắt buộc có trường name; có thể thêm detail mô tả ngắn gọn khi hữu ích.\n"
+        "- Không dùng dấu ngoặc kép chưa escape trong nội dung; nếu cần trích dẫn hãy dùng dấu '.\n"
+        "- Tên node ngắn gọn (2-5 từ), ưu tiên cùng ngôn ngữ với tài liệu.\n"
+        "- Ví dụ JSON: {\"name\":\"Root\",\"children\":[{\"name\":\"Chủ đề\",\"children\":[{\"name\":\"Nhánh con\",\"detail\":\"Mô tả\"}]}]}"
     )
     bullet_block = "\n".join(f"- {item}" for item in prepared_chunks)
     user_prompt = (
