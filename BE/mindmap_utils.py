@@ -7,21 +7,6 @@ from ollama_utils import run_ollama_chat, SLM_MODEL
 
 MAX_SEGMENTS_FOR_MINDMAP = 24
 MAX_CHARS_FOR_MINDMAP = 8000
-ADMIN_KEYWORDS = {
-    "họ và tên",
-    "giảng viên",
-    "gvhd",
-    "trường đại học",
-    "viện đào tạo",
-    "tp.hcm",
-    "th.s",
-    "ths",
-    "thạc sĩ",
-    "chấm điểm",
-    "ký tên",
-    "mssv",
-    "lớp",
-}
 
 
 def _prepare_mindmap_chunks(chunks: list[str]) -> list[str]:
@@ -199,21 +184,11 @@ def _sanitize_node(node):
             deduped.append(child)
     children = deduped
 
-    lower_name = name.lower()
-
     if name.startswith("TC") and not children:
         return None
 
     if not children and not detail and len(name) <= 3:
         return None
-
-    if not children and any(keyword in lower_name for keyword in ADMIN_KEYWORDS):
-        return None
-
-    if detail:
-        lowered_detail = detail.lower()
-        if any(keyword in lowered_detail for keyword in ADMIN_KEYWORDS) and not children:
-            return None
 
     sanitized = {"name": name, "children": children}
     if detail:
