@@ -1,4 +1,15 @@
 # mindmap_utils.py
+"""
+Pipeline tạo mind map dựa trên kỹ thuật iterative prompting:
+
+1. Root generation: chọn chủ đề trung tâm bằng cách lọc noise và nhắc lệnh riêng.
+2. Iterative expansion: lần lượt mở rộng từng nút lá, mô hình tự quyết định tiếp tục hay dừng.
+3. Critics (factuality → local structure → global structure): ba lần rà soát độc lập
+   giúp đối chiếu dẫn chứng, cụ thể hóa nhánh lá và cân bằng bố cục toàn cục giống mục lục.
+
+Mỗi bước đều vận hành hoàn toàn bằng JSON để dễ parse/verify.
+"""
+
 import re
 import json
 import ast
@@ -771,43 +782,146 @@ def _build_mindmap_iterative(content_segments: list[str], noise_terms: set[str],
     return sanitized
 
 
+def _format_segments_for_prompt(segments: list[str], limit: int = CRITIC_SEGMENTS) -> str:
+    if not segments:
+        return "-"
+    lines = []
+    for idx, segment in enumerate(segments[:limit]):
+        snippet = segment.strip()
+        if not snippet:
+            continue
+        lines.append(f"[{idx + 1}] {snippet}")
+    return "\n".join(lines) if lines else "-"
+
+
+def _run_critic(system_prompt: str, user_prompt: str, noise_terms: set[str] | None, model: str | None) -> dict | None:
+    raw = run_ollama_chat(system_prompt, user_prompt, model=model or SLM_MODEL)
+    candidate = extract_json_tree(raw)
+    return _sanitize_tree(candidate, noise_terms)
+
+
+def _apply_factuality_critic(tree: dict, content_segments: list[str], noise_terms: set[str], model: str | None) -> dict | None:
+    if not tree or not tree.get("children"):
+        return tree
+
+    tree_dump = json.dumps(tree, ensure_ascii=False, indent=2)
+    context_block = _format_segments_for_prompt(content_segments)
+
+    system_prompt = "\n".join([
+        "Bạn là factuality critic cho mind map sinh bởi kỹ thuật iterative prompting.",
+        "Mục tiêu: chỉ giữ lại các nhánh có bằng chứng trong văn bản, hoặc hợp nhất/gỡ bỏ phần không được hỗ trợ.",
+        "- Mỗi đường dẫn root→leaf cần được hỗ trợ bởi ít nhất một câu trong danh sách trích đoạn.",
+        "- Nếu một nhánh thiếu dẫn chứng, hãy xóa hoặc gộp vào nhánh phù hợp khác.",
+        "- Viết citation ngay trong trường detail của nút lá theo định dạng [1], [2-3] tương ứng với chỉ số câu (1-based).",
+        "- Không tạo thông tin mới không xuất hiện trong văn bản.",
+        "Chỉ trả về DUY NHẤT một block JSON hợp lệ cho mind map đã chỉnh sửa (schema {name, detail?, children}).",
+    ])
+
+    user_prompt = "\n".join([
+        "Mind map hiện tại:",
+        "```json",
+        tree_dump,
+        "```",
+        "Các đoạn văn bản tham chiếu:",
+        context_block,
+        "Hãy rà soát factuality, giữ nguyên cấu trúc tối đa nhưng loại bỏ/điều chỉnh nhánh thiếu dẫn chứng.",
+    ])
+
+    try:
+        return _run_critic(system_prompt, user_prompt, noise_terms, model)
+    except Exception as exc:
+        print(f"⚠️ Factuality critic bỏ qua do lỗi: {exc}")
+        return tree
+
+
+def _apply_local_structure_critic(tree: dict, content_segments: list[str], noise_terms: set[str], model: str | None) -> dict | None:
+    if not tree or not tree.get("children"):
+        return tree
+
+    tree_dump = json.dumps(tree, ensure_ascii=False, indent=2)
+    context_block = _format_segments_for_prompt(content_segments)
+
+    system_prompt = "\n".join([
+        "Bạn là local-structure critic cho mind map.",
+        "Yêu cầu: đảm bảo mỗi đường dẫn root→leaf kết thúc ở một khái niệm cụ thể, tránh trùng lặp với tiêu đề cha.",
+        "- Nếu tiêu đề lá quá chung chung (ví dụ trùng với cha, hoặc chỉ là 'Giới thiệu'), hãy đổi tên cho cụ thể hoặc hợp nhất.",
+        "- Có thể thêm một lớp con mới nếu cần để đạt tới ý cụ thể, nhưng giữ độ sâu ≤ 4.",
+        "- detail (nếu có) phải ngắn gọn ≤ 16 từ và có thể tái sử dụng citation hiện có.",
+        "- Không thay đổi ý nghĩa những nhánh đã qua factuality (không được bịa thêm nội dung mới).",
+        "Đầu ra bắt buộc: DUY NHẤT một block JSON hợp lệ với schema {name, detail?, children}.",
+    ])
+
+    user_prompt = "\n".join([
+        "Mind map sau bước factuality:",
+        "```json",
+        tree_dump,
+        "```",
+        "Các đoạn văn bản tham chiếu (dùng để kiểm tra mức độ cụ thể):",
+        context_block,
+        "Chuẩn hóa cấu trúc cục bộ theo yêu cầu trên, ưu tiên giữ nguyên tên khi đã đủ cụ thể.",
+    ])
+
+    try:
+        return _run_critic(system_prompt, user_prompt, noise_terms, model)
+    except Exception as exc:
+        print(f"⚠️ Local structure critic bỏ qua do lỗi: {exc}")
+        return tree
+
+
+def _apply_global_structure_critic(tree: dict, content_segments: list[str], noise_terms: set[str], model: str | None) -> dict | None:
+    if not tree or not tree.get("children"):
+        return tree
+
+    tree_dump = json.dumps(tree, ensure_ascii=False, indent=2)
+    context_block = _format_segments_for_prompt(content_segments)
+
+    system_prompt = "\n".join([
+        "Bạn là global-structure critic cho mind map.",
+        "Trước khi chỉnh sửa, hãy hình dung mind map dưới dạng mục lục (ToC) để kiểm tra cấp độ trừu tượng.",
+        "- Tối ưu số nhánh cấp 1 khoảng 4-7 (linh hoạt theo nội dung).",
+        "- Đảm bảo phân nhóm logic, cân đối số nhánh con giữa các ngành chính.",
+        "- Có thể đổi tên node cấp 1 cho rõ ràng hoặc tái phân bổ nhánh con, nhưng không được thêm nội dung ngoài văn bản.",
+        "- Nếu tồn tại nhánh riêng lẻ yếu (ít con, trùng chủ đề), hãy hợp nhất vào nhánh phù hợp hơn.",
+        "- Giữ nguyên citation trong detail nếu đã có.",
+        "Đầu ra bắt buộc: DUY NHẤT một block JSON hợp lệ (schema {name, detail?, children}).",
+    ])
+
+    user_prompt = "\n".join([
+        "Mind map sau bước local structure:",
+        "```json",
+        tree_dump,
+        "```",
+        "Các đoạn văn bản tham chiếu (để cân nhắc bố cục):",
+        context_block,
+        "Tối ưu cấu trúc tổng thể nhưng tránh tạo node mới không có trong nội dung.",
+    ])
+
+    try:
+        return _run_critic(system_prompt, user_prompt, noise_terms, model)
+    except Exception as exc:
+        print(f"⚠️ Global structure critic bỏ qua do lỗi: {exc}")
+        return tree
+
+
 def _apply_mindmap_critics(tree: dict, content_segments: list[str], noise_terms: set[str], model: str | None) -> dict:
     if not tree or not isinstance(tree, dict):
         return tree
     if not tree.get("children"):
         return tree
 
-    sample_segments = (content_segments or [])[:CRITIC_SEGMENTS]
-    context_block = "\n".join(f"- {item}" for item in sample_segments) if sample_segments else "-"
-    tree_dump = json.dumps(tree, ensure_ascii=False, indent=2)
+    critics = (
+        _apply_factuality_critic,
+        _apply_local_structure_critic,
+        _apply_global_structure_critic,
+    )
 
-    system_prompt = "\n".join([
-        "Bạn là bộ chỉ trích (critic) sơ đồ tư duy sử dụng kỹ thuật iterative prompting.",
-        "Nhiệm vụ: đánh giá và cải thiện mindmap theo 3 góc độ: factuality, local structure, global structure.",
-        "- Factuality: giữ lại các nhánh chỉ khi được hỗ trợ bởi nội dung đã cho; nếu thiếu bằng chứng hãy gỡ bỏ hoặc hợp nhất.",
-        "- Local structure: mỗi đường dẫn root→leaf phải kết thúc ở một ý cụ thể/khái niệm rõ ràng, không dừng ở tiêu đề chung chung.",
-        "- Global structure: mindmap phải cân đối 4-7 nhánh cấp 1 (linh hoạt), phản ánh chuẩn mục lục (ToC) hợp lý của tài liệu.",
-        "Tuyệt đối loại bỏ thông tin hành chính (giảng viên, điểm, ngày tháng, chữ ký…).",
-        "Đầu ra: DUY NHẤT một block JSON hợp lệ cho mindmap đã chỉnh sửa (giữ schema {name, detail?, children?}).",
-    ])
+    refined = tree
+    for critic in critics:
+        updated = critic(refined, content_segments, noise_terms, model)
+        if isinstance(updated, dict) and updated.get("children"):
+            refined = updated
 
-    user_prompt = "\n".join([
-        "Mindmap hiện tại (cần rà soát):",
-        "```json",
-        tree_dump,
-        "```",
-        "Văn bản tham chiếu (trích đoạn đại diện):",
-        context_block,
-        "Yêu cầu: tinh chỉnh mindmap theo tiêu chí trên; nếu đã tối ưu thì trả về bản không đổi nhưng vẫn phải là JSON hợp lệ.",
-    ])
-
-    try:
-        raw = run_ollama_chat(system_prompt, user_prompt, model=model or SLM_MODEL)
-        refined = extract_json_tree(raw)
-        return _sanitize_tree(refined, noise_terms)
-    except Exception as exc:
-        print(f"⚠️ Mindmap critics bỏ qua do lỗi: {exc}")
-        return tree
+    return refined
 
 
 def get_nested_mindmap(chunks: list[str], model: str = None) -> dict:
