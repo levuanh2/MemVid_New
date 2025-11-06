@@ -745,14 +745,39 @@ def _expand_leaf_node(
     ]
     user_prompt = "\n".join(user_lines)
 
-    raw = run_ollama_chat(system_prompt, user_prompt, model=model or SLM_MODEL)
-    try:
-        result = extract_json_tree(raw)
-    except Exception as exc:
-        raise ValueError(f"Không thể mở rộng nhánh {path_str}: {exc}")
+    attempts = 2
+    last_error: Exception | None = None
+    result = None
+
+    for attempt in range(attempts):
+        system_prompt_current = system_prompt
+        user_prompt_current = user_prompt
+        if attempt and last_error:
+            system_prompt_current += (
+                "\nLưu ý: phản hồi trước không phải JSON hợp lệ ("
+                + str(last_error)
+                + "). Chỉ trả về JSON duy nhất theo mẫu đã nêu."
+            )
+            user_prompt_current += "\n\n⚠️ Bổ sung: JSON lần trước lỗi, hãy trả về đúng schema {\"expand\": bool, \"children\": [...]}"
+
+        raw = run_ollama_chat(system_prompt_current, user_prompt_current, model=model or SLM_MODEL)
+        try:
+            result = extract_json_tree(raw)
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                result = None
+            else:
+                continue
+
+    if result is None:
+        print(f"⚠️ Không thể mở rộng nhánh {path_str}: {last_error}")
+        return {"expand": False, "children": []}
 
     if not isinstance(result, dict):
-        raise ValueError(f"Phản hồi mở rộng không phải JSON object: {result}")
+        print(f"⚠️ Phản hồi mở rộng không phải JSON object ({path_str}): {result}")
+        return {"expand": False, "children": []}
 
     expand_flag = _to_bool(result.get("expand"), default=True)
     children = result.get("children")
