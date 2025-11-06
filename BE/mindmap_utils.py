@@ -1104,9 +1104,29 @@ def _format_segments_for_prompt(segments: list[str], limit: int = CRITIC_SEGMENT
 
 
 def _run_critic(system_prompt: str, user_prompt: str, noise_terms: set[str] | None, model: str | None) -> dict | None:
-    raw = run_ollama_chat(system_prompt, user_prompt, model=model or SLM_MODEL)
-    candidate = extract_json_tree(raw)
-    return _sanitize_tree(candidate, noise_terms)
+    attempts = 2
+    last_error: Exception | None = None
+
+    for attempt in range(attempts):
+        system_prompt_current = system_prompt
+        user_prompt_current = user_prompt
+        if attempt and last_error:
+            system_prompt_current += (
+                "\nLưu ý: phản hồi trước không phải JSON hợp lệ ("
+                + str(last_error)
+                + "). Chỉ trả về duy nhất block ```json``` với schema {name, detail?, children}."
+            )
+            user_prompt_current += "\n\n⚠️ JSON lần trước lỗi, hãy trả về đúng block ```json``` duy nhất cho mindmap."
+
+        raw = run_ollama_chat(system_prompt_current, user_prompt_current, model=model or SLM_MODEL)
+        try:
+            candidate = extract_json_tree(raw)
+            return _sanitize_tree(candidate, noise_terms)
+        except Exception as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                raise
+
 
 
 def _apply_factuality_critic(tree: dict, content_segments: list[str], noise_terms: set[str], model: str | None) -> dict | None:

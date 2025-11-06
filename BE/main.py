@@ -3,7 +3,7 @@ import unicodedata
 import json
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -383,7 +383,7 @@ def generate_mindmap():
             "title": root_title,
             "nodes": flat_nodes,
             "sources": sources,
-            "createdAt": datetime.utcnow().isoformat() + "Z",
+            "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "strategy": strategy_used,
         }
 
