@@ -2,16 +2,75 @@
 import re
 import json
 import ast
+from collections import deque
 from ollama_utils import run_ollama_chat, SLM_MODEL
 
 
 MAX_SEGMENTS_FOR_MINDMAP = 24
 MAX_CHARS_FOR_MINDMAP = 8000
+MAX_MINDMAP_DEPTH = 3
+MAX_EXPANSION_CALLS = 18
+MIN_ROOT_CHILDREN = 4
+MIN_INNER_CHILDREN = 2
+CONTEXT_SEGMENTS_PER_NODE = 8
+
+ADMIN_SKIP_PATTERNS = [
+    r"\bnhận\s*xét\b",
+    r"\bgiảng\s*viên\b",
+    r"\bgvhd\b",
+    r"\bbằng\s*số\b",
+    r"\bbằng\s*chữ\b",
+    r"\bchấm\s*điểm\b",
+    r"\btp\.?\s*h\.??c\.??m\b",
+    r"\btháng\b",
+    r"\bngày\b",
+    r"\bký\s*(?:tên|duyệt)\b",
+    r"\bmục\s*lục\b",
+    r"\bdanh\s*mục\b",
+]
+
+ADMIN_TOPIC_PATTERNS = [
+    r"\bnhận\s*xét\b",
+    r"\bgiảng\s*viên\b",
+    r"\bgvhd\b",
+    r"\bbằng\s*(?:số|chữ)\b",
+    r"\bchấm\s*điểm\b",
+    r"\btp\.?\s*h\.??c\.??m\b",
+    r"\btháng\b",
+    r"\bngày\b",
+]
+
+
+def _is_noise_topic(name: str) -> bool:
+    if not name:
+        return True
+    lowered = name.strip().lower()
+    if not lowered:
+        return True
+    return any(re.search(pattern, lowered, flags=re.I) for pattern in ADMIN_TOPIC_PATTERNS)
+
+
+def _to_bool(value, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"false", "0", "no", "n", "off"}:
+            return False
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
 
 
 def _prepare_mindmap_chunks(chunks: list[str]) -> list[str]:
     """Clean & limit chunks for prompting while preserving order."""
     prepared: list[str] = []
+    filtered: list[str] = []
     total_chars = 0
 
     for chunk in chunks or []:
@@ -28,7 +87,15 @@ def _prepare_mindmap_chunks(chunks: list[str]) -> list[str]:
         prepared.append(normalized)
         total_chars = next_len
 
-    return prepared
+    if not prepared:
+        return []
+
+    for item in prepared:
+        if any(re.search(pattern, item, flags=re.I) for pattern in ADMIN_SKIP_PATTERNS):
+            continue
+        filtered.append(item)
+
+    return filtered or prepared
 
 
 def _escape_inner_quotes(body: str) -> str:
@@ -115,6 +182,40 @@ def _insert_missing_commas(body: str) -> str:
     return "".join(chars)
 
 
+def _context_for_path(path: list[str], content_segments: list[str], limit: int = CONTEXT_SEGMENTS_PER_NODE) -> list[str]:
+    if not content_segments:
+        return []
+
+    keywords: set[str] = set()
+    for name in path:
+        for token in re.findall(r"[\wÀ-ỹ']+", name or "", flags=re.I):
+            token_clean = token.lower()
+            if len(token_clean) >= 4:
+                keywords.add(token_clean)
+
+    matched: list[str] = []
+    if keywords:
+        for segment in content_segments:
+            lowered = segment.lower()
+            if any(keyword in lowered for keyword in keywords):
+                if segment not in matched:
+                    matched.append(segment)
+            if len(matched) >= limit:
+                break
+
+    if not matched:
+        matched = content_segments[:limit]
+    elif len(matched) < limit:
+        for segment in content_segments:
+            if segment in matched:
+                continue
+            matched.append(segment)
+            if len(matched) >= limit:
+                break
+
+    return matched[:limit]
+
+
 def _literal_eval_json(body: str):
     """Fallback parser using ast.literal_eval for JSON-like strings."""
     try:
@@ -124,6 +225,20 @@ def _literal_eval_json(body: str):
         return ast.literal_eval(safe)
     except Exception:
         return None
+
+
+def _fallback_root_from_segments(segments: list[str]) -> str:
+    for segment in segments or []:
+        snippet = segment.strip()
+        if not snippet:
+            continue
+        candidate = re.split(r"[\.:\-–|]", snippet)[0].strip()
+        if len(candidate) < 4:
+            continue
+        if _is_noise_topic(candidate):
+            continue
+        return candidate
+    return "Mind Map"
 
 
 def extract_json_tree(raw: str) -> dict:
@@ -182,6 +297,113 @@ def extract_json_tree(raw: str) -> dict:
             lines.append(line)
         cleaned = "\n".join(lines)
         return json.loads(cleaned)
+
+
+def _generate_root_topic(content_segments: list[str], model: str | None) -> str:
+    sample = content_segments[:8]
+    bullet_block = "\n".join(f"- {item}" for item in sample)
+
+    system_prompt = "\n".join([
+        "Bạn là chuyên gia tạo sơ đồ tư duy với phương pháp iterative prompting.",
+        "Giai đoạn hiện tại: xác định nút gốc duy nhất đại diện cho chủ đề học thuật chính.",
+        "BỎ QUA mọi thông tin hành chính (giảng viên, nhận xét, điểm số, ngày tháng, địa điểm).",
+        "Chỉ trả về JSON hợp lệ dạng {\"root\": \"...\", \"alternatives\": [..]} (alternatives tùy chọn)."
+    ])
+
+    user_prompt = "\n".join([
+        "Tóm tắt nội dung chỉ để chọn root (không tạo branches ở bước này):",
+        bullet_block,
+        "Root phải mô tả chính xác chủ đề học thuật trung tâm của tài liệu." ,
+        "Không dùng các cụm liên quan đến chấm điểm, giảng viên, hay metadata hành chính." ,
+    ])
+
+    raw = run_ollama_chat(system_prompt, user_prompt, model=model or SLM_MODEL)
+    try:
+        root_obj = extract_json_tree(raw)
+    except Exception as exc:
+        raise ValueError(f"Không thể trích JSON root: {exc}")
+
+    candidates: list[str] = []
+    if isinstance(root_obj, dict):
+        for key in ("root", "name", "title"):
+            value = root_obj.get(key)
+            if value:
+                candidates.append(str(value).strip())
+        alt = root_obj.get("alternatives")
+        if isinstance(alt, (list, tuple)):
+            candidates.extend(str(item).strip() for item in alt if item)
+    elif isinstance(root_obj, list):
+        candidates.extend(str(item).strip() for item in root_obj if item)
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if _is_noise_topic(candidate):
+            continue
+        return candidate
+
+    return _fallback_root_from_segments(content_segments)
+
+
+def _expand_leaf_node(
+    path: list[str],
+    node: dict,
+    content_segments: list[str],
+    blocked_names: set[str],
+    depth: int,
+    model: str | None,
+) -> dict:
+    path_str = " > ".join(path)
+    current_children = [str(child.get("name", "")).strip() for child in node.get("children", []) or [] if child]
+    blocked_display = sorted(name for name in (blocked_names or set()) if name)
+
+    min_children = MIN_ROOT_CHILDREN if depth == 0 else MIN_INNER_CHILDREN
+    max_children = 6 if depth == 0 else 5 if depth == 1 else 4
+    range_hint = f"{min_children}-{max_children}"
+
+    context = content_segments or []
+    if not context:
+        context = [""]
+    bullet_context = "\n".join(f"- {segment}" for segment in context)
+
+    instructions = [
+        "Bạn đang ở pha mở rộng của kỹ thuật iterative prompting.",
+        "Mục tiêu: mở rộng nút hiện tại bằng các chủ đề con cụ thể, được hỗ trợ bởi nội dung nguồn.",
+        "BẮT BUỘC tránh lặp lại những nhánh đã có hoặc các cụm hành chính (giảng viên, điểm, ngày tháng, địa điểm).",
+        "Tên nhánh dài 2-8 từ, tập trung vào khái niệm học thuật; detail (nếu cần) tối đa 16 từ.",
+        "Chỉ thêm detail khi nó bổ sung bối cảnh; bỏ field detail nếu không cần.",
+        "Nếu không còn nội dung phù hợp, trả về {\"expand\": false, \"children\": []}.",
+        "Luôn trả về JSON hợp lệ duy nhất với khóa expand (boolean) và children (list).",
+    ]
+    system_prompt = "\n".join(instructions)
+
+    user_lines = [
+        f"Đường dẫn nút: {path_str or 'Root'}",
+        f"Độ sâu hiện tại: {depth}",
+        f"Nhánh đã có: {', '.join(current_children) if current_children else 'Chưa có'}",
+        f"Tên cần tránh (toàn cục): {', '.join(blocked_display[:15]) if blocked_display else 'Không'}",
+        f"Số nhánh cần đề xuất: khoảng {range_hint} (có thể linh hoạt nếu nội dung hạn chế)",
+        "Nguồn nội dung liên quan:",
+        bullet_context,
+        "Đầu ra mẫu: {\"expand\": true, \"children\": [{\"name\": \"Khái niệm chính\", \"detail\": \"Mô tả ngắn\"}]}"
+    ]
+    user_prompt = "\n".join(user_lines)
+
+    raw = run_ollama_chat(system_prompt, user_prompt, model=model or SLM_MODEL)
+    try:
+        result = extract_json_tree(raw)
+    except Exception as exc:
+        raise ValueError(f"Không thể mở rộng nhánh {path_str}: {exc}")
+
+    if not isinstance(result, dict):
+        raise ValueError(f"Phản hồi mở rộng không phải JSON object: {result}")
+
+    expand_flag = _to_bool(result.get("expand"), default=True)
+    children = result.get("children")
+    if not isinstance(children, list):
+        children = []
+
+    return {"expand": expand_flag, "children": children}
 
 
 def _sanitize_node(node):
@@ -333,14 +555,7 @@ def _expand_tree(tree: dict, bullet_block: str, model: str | None):
         return None
 
 
-def get_nested_mindmap(chunks: list[str], model: str = None) -> dict:
-    """
-    Gọi SLM để tạo nested mind map JSON có logic chặt chẽ.
-    """
-    prepared_chunks = _prepare_mindmap_chunks(chunks)
-    if not prepared_chunks:
-        raise ValueError("Không có dữ liệu nguồn để tạo mindmap")
-
+def _build_mindmap_single_shot(prepared_chunks: list[str], model: str | None) -> dict:
     system_prompt = "\n".join([
         "Bạn là AI mindmap chuyên nghiệp. Trả về DUY NHẤT JSON tree nested (```json ...```), bảo đảm JSON hợp lệ.",
         "- Đặt root theo chủ đề trọng tâm, không giữ nguyên các tiêu đề hành chính/bìa.",
@@ -390,6 +605,104 @@ def get_nested_mindmap(chunks: list[str], model: str = None) -> dict:
             tree = enriched
 
     return tree
+
+
+def _build_mindmap_iterative(prepared_chunks: list[str], model: str | None) -> dict:
+    root_name = _generate_root_topic(prepared_chunks, model)
+    if not root_name:
+        raise ValueError("Không xác định được root topic")
+
+    root = {"name": root_name, "children": []}
+    used_titles = {root_name.strip().lower()}
+    queue: deque[dict] = deque([{"node": root, "path": [root_name], "depth": 0}])
+    expansion_attempts: dict[tuple[str, ...], int] = {}
+    steps = 0
+
+    while queue and steps < MAX_EXPANSION_CALLS:
+        current = queue.popleft()
+        node = current["node"]
+        depth = current["depth"]
+        path = current["path"]
+        path_key = tuple(path)
+
+        if depth >= MAX_MINDMAP_DEPTH:
+            continue
+
+        expansion_attempts[path_key] = expansion_attempts.get(path_key, 0) + 1
+        context_segments = _context_for_path(path, prepared_chunks)
+
+        blocked_names = set(used_titles)
+        for child in node.get("children", []) or []:
+            title = str(child.get("name", "")).strip().lower()
+            if title:
+                blocked_names.add(title)
+
+        expand_result = _expand_leaf_node(path, node, context_segments, blocked_names, depth, model)
+        raw_children = expand_result.get("children", [])
+        should_expand = _to_bool(expand_result.get("expand"), default=True)
+
+        valid_children: list[dict] = []
+        for raw_child in raw_children:
+            sanitized = _sanitize_node(raw_child)
+            if not sanitized:
+                continue
+            child_name = sanitized.get("name", "").strip()
+            if not child_name:
+                continue
+            lowered = child_name.lower()
+            if lowered in blocked_names or _is_noise_topic(child_name):
+                continue
+            blocked_names.add(lowered)
+            used_titles.add(lowered)
+            valid_children.append(sanitized)
+
+        if valid_children:
+            node.setdefault("children", []).extend(valid_children)
+
+        total_children = len(node.get("children", []) or [])
+        min_children = MIN_ROOT_CHILDREN if depth == 0 else MIN_INNER_CHILDREN
+
+        if should_expand and valid_children and depth + 1 < MAX_MINDMAP_DEPTH:
+            for child in valid_children:
+                queue.append({
+                    "node": child,
+                    "path": path + [child.get("name", "")],
+                    "depth": depth + 1,
+                })
+
+        if should_expand and total_children < min_children and expansion_attempts[path_key] < 3:
+            queue.append({"node": node, "path": path, "depth": depth})
+
+        steps += 1
+
+    sanitized = _sanitize_tree(root)
+    if not sanitized.get("children"):
+        raise ValueError("Iterative builder trả về cây rỗng")
+    return sanitized
+
+
+def get_nested_mindmap(chunks: list[str], model: str = None) -> dict:
+    """Sinh mindmap nested với iterative prompting, fallback single-shot."""
+    prepared_chunks = _prepare_mindmap_chunks(chunks)
+    if not prepared_chunks:
+        raise ValueError("Không có dữ liệu nguồn để tạo mindmap")
+
+    builders = (_build_mindmap_iterative, _build_mindmap_single_shot)
+    last_error: Exception | None = None
+
+    for builder in builders:
+        try:
+            tree = builder(prepared_chunks, model)
+            if tree and tree.get("children"):
+                return tree
+        except Exception as exc:
+            print(f"⚠️ Mindmap builder {builder.__name__} failed: {exc}")
+            last_error = exc
+
+    if last_error:
+        raise last_error
+
+    return {"name": "Mind Map", "children": []}
 
 
 def get_main_branches(chunks: list[str], model: str = None) -> list[str]:
