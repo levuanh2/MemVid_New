@@ -1,6 +1,7 @@
 # mindmap_utils.py
 import re
 import json
+import ast
 from ollama_utils import run_ollama_chat, SLM_MODEL
 
 
@@ -35,7 +36,7 @@ def _escape_inner_quotes(body: str) -> str:
     result: list[str] = []
     inside_string = False
     escape = False
-    closers = {",", "}", "]", " ", "\n", "\r", "\t", ""}
+    closers = {",", "}", "]", " ", "\n", "\r", "\t"}
     length = len(body)
 
     for idx, ch in enumerate(body):
@@ -43,7 +44,7 @@ def _escape_inner_quotes(body: str) -> str:
 
         if ch == "\"" and not escape:
             if inside_string:
-                if next_char in closers:
+                if next_char in closers or next_char == "":
                     inside_string = False
                     result.append(ch)
                 else:
@@ -62,6 +63,17 @@ def _escape_inner_quotes(body: str) -> str:
         result.append(ch)
 
     return "".join(result)
+
+
+def _literal_eval_json(body: str):
+    """Fallback parser using ast.literal_eval for JSON-like strings."""
+    try:
+        safe = re.sub(r"\btrue\b", "True", body, flags=re.I)
+        safe = re.sub(r"\bfalse\b", "False", safe, flags=re.I)
+        safe = re.sub(r"\bnull\b", "None", safe, flags=re.I)
+        return ast.literal_eval(safe)
+    except Exception:
+        return None
 
 
 def extract_json_tree(raw: str) -> dict:
@@ -94,6 +106,11 @@ def extract_json_tree(raw: str) -> dict:
         except json.JSONDecodeError:
             body = escaped_body
 
+        # Thử literal eval (cho trường hợp dùng dấu nháy đơn, hoặc thiếu dấu phẩy nhỏ)
+        literal_obj = _literal_eval_json(body)
+        if literal_obj is not None:
+            return literal_obj
+
         # Nếu vẫn fail thì clean comment, markdown, bullet
         lines = []
         for line in body.splitlines():
@@ -109,6 +126,109 @@ def extract_json_tree(raw: str) -> dict:
         return json.loads(cleaned)
 
 
+def _sanitize_node(node):
+    if not isinstance(node, dict):
+        return None
+
+    name = str(node.get("name", "")).strip()
+    if not name:
+        name = "Untitled"
+
+    detail = node.get("detail")
+    if detail is not None:
+        detail = str(detail).strip()
+        if not detail:
+            detail = None
+
+    children = []
+    for child in node.get("children", []) or []:
+        sanitized_child = _sanitize_node(child)
+        if sanitized_child:
+            children.append(sanitized_child)
+
+    if name.startswith("TC") and not children:
+        return None
+
+    sanitized = {"name": name, "children": children}
+    if detail:
+        sanitized["detail"] = detail
+    return sanitized
+
+
+def _sanitize_tree(obj):
+    if isinstance(obj, dict):
+        root = _sanitize_node(obj) or {"name": "Mind Map", "children": []}
+        if not root.get("name"):
+            root["name"] = "Mind Map"
+        if not isinstance(root.get("children"), list):
+            root["children"] = []
+        return root
+    if isinstance(obj, list):
+        children = []
+        for item in obj:
+            sanitized = _sanitize_node(item)
+            if sanitized:
+                children.append(sanitized)
+        return {"name": "Mind Map", "children": children}
+    return {"name": "Mind Map", "children": []}
+
+
+def _count_nodes(node):
+    if not isinstance(node, dict):
+        return 0
+    total = 1
+    for child in node.get("children", []):
+        total += _count_nodes(child)
+    return total
+
+
+def _needs_enrichment(tree: dict, content_segments: list[str]) -> bool:
+    top_children = tree.get("children", [])
+    topic_count = len(top_children)
+    if topic_count >= 4:
+        return False
+    if len(content_segments) <= 4:
+        return False
+    if topic_count == 0:
+        return True
+    avg_children = sum(len(child.get("children", [])) for child in top_children) / max(topic_count, 1)
+    if avg_children < 1 and len(content_segments) > 6:
+        return True
+    if len(content_segments) >= 8:
+        target_nodes = min(30, max(10, int(len(content_segments) * 0.8)))
+        if _count_nodes(tree) < target_nodes:
+            return True
+    return False
+
+
+def _expand_tree(tree: dict, bullet_block: str, model: str | None):
+    try:
+        current = json.dumps(tree, ensure_ascii=False)
+    except TypeError:
+        current = str(tree)
+
+    system_prompt = (
+        "Bạn là AI mindmap chuyên nghiệp. Dựa trên mindmap hiện có, mở rộng thành phiên bản đầy đủ hơn và giữ đúng JSON hợp lệ.\n"
+        "- Bảo toàn các nhánh cũ (có thể đổi tên cho rõ) và bổ sung các nhánh cần thiết.\n"
+        "- Trả về DUY NHẤT một block ```json ...``` với cấu trúc mindmap hoàn chỉnh."
+    )
+    user_prompt = (
+        "Mindmap hiện tại:\n```json\n"
+        f"{current}\n```\n"
+        "Các ý liệu chi tiết:\n"
+        f"{bullet_block}\n"
+        "Hãy trả về JSON mindmap đã mở rộng (```json ...```)."
+    )
+
+    try:
+        raw = run_ollama_chat(system_prompt, user_prompt, model=model or SLM_MODEL)
+        expanded_obj = extract_json_tree(raw)
+        return _sanitize_tree(expanded_obj)
+    except Exception as e:
+        print(f"⚠️ Mindmap enrichment failed: {e}")
+        return None
+
+
 def get_nested_mindmap(chunks: list[str], model: str = None) -> dict:
     """
     Gọi SLM để tạo nested mind map JSON có logic chặt chẽ.
@@ -119,36 +239,51 @@ def get_nested_mindmap(chunks: list[str], model: str = None) -> dict:
 
     system_prompt = (
         "Bạn là AI mindmap chuyên nghiệp. Trả về DUY NHẤT JSON tree nested (```json ...```), bảo đảm JSON hợp lệ.\n"
-        "- Phân tích nội dung và tự xác định số lượng nhánh phù hợp (không cố định).\n"
+        "- Phân tích nội dung và tự xác định số lượng nhánh phù hợp, bao quát đầy đủ các ý trọng tâm.\n"
         "- Cấu trúc gợi ý: Root → Chủ đề → Nhánh con → Chi tiết (độ sâu ≤ 4 nếu cần).\n"
-        "- node bắt buộc có trường name; có thể thêm detail mô tả ngắn gọn khi hữu ích.\n"
-        "- Không dùng dấu ngoặc kép chưa escape trong nội dung; nếu cần trích dẫn hãy dùng dấu '.\n"
-        "- Tên node ngắn gọn (2-5 từ), ưu tiên cùng ngôn ngữ với tài liệu.\n"
+        "- Mỗi node bắt buộc có trường name; có thể thêm detail để mô tả hoặc trích dẫn ngắn gọn (dùng dấu ' thay vì \").\n"
+        "- Tên node ngắn gọn (2-5 từ), cùng ngôn ngữ với tài liệu.\n"
+        "- Các nhánh phải logic và cân đối: 4-7 chủ đề chính, mỗi chủ đề 2-5 nhánh phụ, tùy nội dung.\n"
+        "- Dựa vào các nguồn/dẫn chứng trong tài liệu để đặt detail khi thích hợp.\n"
         "- Ví dụ JSON: {\"name\":\"Root\",\"children\":[{\"name\":\"Chủ đề\",\"children\":[{\"name\":\"Nhánh con\",\"detail\":\"Mô tả\"}]}]}"
     )
     bullet_block = "\n".join(f"- {item}" for item in prepared_chunks)
-    user_prompt = (
+    base_user_prompt = (
         "Sinh mindmap liền mạch từ các ý dưới đây (theo đúng thứ tự được cung cấp).\n"
         "Gom các ý liên quan thành chủ đề chính rồi chia tiếp thành các nhánh phụ logic.\n"
         "Dữ liệu tham khảo:\n"
         f"{bullet_block}"
     )
 
-    raw = run_ollama_chat(system_prompt, user_prompt, model=model or SLM_MODEL)
-    tree = extract_json_tree(raw)
+    last_error = None
+    tree_obj = None
 
-    # Post-clean: loại node TC lạc lõng
-    def clean_logic(node):
-        if isinstance(node, dict):
-            name = node.get("name", "")
-            children = node.get("children", [])
-            if name.startswith("TC") and not children:
-                return None
-            node["children"] = [c for c in (clean_logic(ch) for ch in children) if c]
-            return node
-        return None
+    for attempt in range(2):
+        system_prompt_final = system_prompt
+        if attempt and last_error:
+            system_prompt_final += (
+                "\nLưu ý: phản hồi trước không phải JSON hợp lệ ("
+                + str(last_error)
+                + "). Chỉ trả về block ```json ...``` chứa mindmap hợp lệ, không thêm text khác."
+            )
 
-    return clean_logic(tree) or {"name": "Mind Map", "children": []}
+        raw = run_ollama_chat(system_prompt_final, base_user_prompt, model=model or SLM_MODEL)
+        try:
+            tree_obj = extract_json_tree(raw)
+            break
+        except Exception as err:
+            last_error = err
+            if attempt == 1:
+                raise err
+
+    tree = _sanitize_tree(tree_obj)
+
+    if _needs_enrichment(tree, prepared_chunks):
+        enriched = _expand_tree(tree, bullet_block, model)
+        if enriched:
+            tree = enriched
+
+    return tree
 
 
 def get_main_branches(chunks: list[str], model: str = None) -> list[str]:
