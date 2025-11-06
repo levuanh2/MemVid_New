@@ -8,8 +8,7 @@ from ollama_utils import run_ollama_chat, SLM_MODEL
 
 MAX_SEGMENTS_FOR_MINDMAP = 24
 MAX_CHARS_FOR_MINDMAP = 8000
-MAX_MINDMAP_DEPTH = 3
-MAX_EXPANSION_CALLS = 18
+MAX_EXPANSION_CALLS_BASE = 18
 MIN_ROOT_CHILDREN = 4
 MIN_INNER_CHILDREN = 2
 CONTEXT_SEGMENTS_PER_NODE = 8
@@ -236,6 +235,48 @@ def _detect_noise_terms(content_segments: list[str], model: str | None) -> set[s
     return {item for item in cleaned if item}
 
 
+def _estimate_depth(content_segments: list[str]) -> int | None:
+    if not content_segments:
+        return 3
+
+    word_counts = [len(segment.split()) for segment in content_segments if segment]
+    total_words = sum(word_counts)
+    if total_words <= 0:
+        return 3
+
+    avg_words = total_words / max(len(word_counts), 1)
+    unique_segments = len({segment.strip().lower() for segment in content_segments if segment})
+
+    if total_words < 250:
+        return 4
+    if total_words < 750:
+        return 5
+    if total_words < 1500:
+        return 6
+
+    # Nếu nội dung rất lớn, cho phép độ sâu linh hoạt (None = không giới hạn cứng)
+    if avg_words > 160 or unique_segments > 18:
+        return None
+
+    return 7
+
+
+def _estimate_expansion_budget(content_segments: list[str]) -> int:
+    if not content_segments:
+        return MAX_EXPANSION_CALLS_BASE
+
+    base = MAX_EXPANSION_CALLS_BASE
+    scaled = len(content_segments) * 3
+    word_total = sum(len(segment.split()) for segment in content_segments if segment)
+
+    if word_total > 1500:
+        scaled += 12
+    if word_total > 2500:
+        scaled += 18
+
+    return max(base, min(120, scaled))
+
+
 def _literal_eval_json(body: str):
     """Fallback parser using ast.literal_eval for JSON-like strings."""
     try:
@@ -374,6 +415,7 @@ def _expand_leaf_node(
     blocked_names: set[str],
     depth: int,
     noise_terms: set[str],
+    max_depth: int | None,
     model: str | None,
 ) -> dict:
     path_str = " > ".join(path)
@@ -381,8 +423,9 @@ def _expand_leaf_node(
     blocked_display = sorted(name for name in (blocked_names or set()) if name)
 
     min_children = MIN_ROOT_CHILDREN if depth == 0 else MIN_INNER_CHILDREN
-    max_children = 6 if depth == 0 else 5 if depth == 1 else 4
+    max_children = max(3, 6 - min(depth, 3))
     range_hint = f"{min_children}-{max_children}"
+    depth_hint = max_depth if max_depth is not None else "linh hoạt"
 
     context = content_segments or []
     if not context:
@@ -403,6 +446,7 @@ def _expand_leaf_node(
     user_lines = [
         f"Đường dẫn nút: {path_str or 'Root'}",
         f"Độ sâu hiện tại: {depth}",
+        f"Giới hạn độ sâu gợi ý: {depth_hint}",
         f"Nhánh đã có: {', '.join(current_children) if current_children else 'Chưa có'}",
         f"Tên cần tránh (toàn cục): {', '.join(blocked_display[:15]) if blocked_display else 'Không'}",
         f"Số nhánh cần đề xuất: khoảng {range_hint} (có thể linh hoạt nếu nội dung hạn chế)",
@@ -643,15 +687,17 @@ def _build_mindmap_iterative(content_segments: list[str], noise_terms: set[str],
     queue: deque[dict] = deque([{"node": root, "path": [root_name], "depth": 0}])
     expansion_attempts: dict[tuple[str, ...], int] = {}
     steps = 0
+    max_depth = _estimate_depth(content_segments)
+    max_steps = _estimate_expansion_budget(content_segments)
 
-    while queue and steps < MAX_EXPANSION_CALLS:
+    while queue and steps < max_steps:
         current = queue.popleft()
         node = current["node"]
         depth = current["depth"]
         path = current["path"]
         path_key = tuple(path)
 
-        if depth >= MAX_MINDMAP_DEPTH:
+        if max_depth is not None and depth >= max_depth:
             continue
 
         expansion_attempts[path_key] = expansion_attempts.get(path_key, 0) + 1
@@ -663,7 +709,16 @@ def _build_mindmap_iterative(content_segments: list[str], noise_terms: set[str],
             if title:
                 blocked_names.add(title)
 
-        expand_result = _expand_leaf_node(path, node, context_segments, blocked_names, depth, noise_terms, model)
+        expand_result = _expand_leaf_node(
+            path,
+            node,
+            context_segments,
+            blocked_names,
+            depth,
+            noise_terms,
+            max_depth,
+            model,
+        )
         raw_children = expand_result.get("children", [])
         should_expand = _to_bool(expand_result.get("expand"), default=True)
 
@@ -687,16 +742,25 @@ def _build_mindmap_iterative(content_segments: list[str], noise_terms: set[str],
 
         total_children = len(node.get("children", []) or [])
         min_children = MIN_ROOT_CHILDREN if depth == 0 else MIN_INNER_CHILDREN
+        max_children = max(3, 6 - min(depth, 3))
+        expand_targets = list(valid_children)
+        if len(expand_targets) > max_children:
+            expand_targets = expand_targets[:max_children]
 
-        if should_expand and valid_children and depth + 1 < MAX_MINDMAP_DEPTH:
-            for child in valid_children:
+        if should_expand and expand_targets and (max_depth is None or depth + 1 <= max_depth):
+            for child in expand_targets:
                 queue.append({
                     "node": child,
                     "path": path + [child.get("name", "")],
                     "depth": depth + 1,
                 })
 
-        if should_expand and total_children < min_children and expansion_attempts[path_key] < 3:
+        if (
+            should_expand
+            and total_children < min_children
+            and expansion_attempts[path_key] < 3
+            and (max_depth is None or depth < max_depth)
+        ):
             queue.append({"node": node, "path": path, "depth": depth})
 
         steps += 1
