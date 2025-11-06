@@ -24,6 +24,7 @@ MIN_ROOT_CHILDREN = 4
 MIN_INNER_CHILDREN = 2
 CONTEXT_SEGMENTS_PER_NODE = 8
 CRITIC_SEGMENTS = 12
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 
 # CMGN (Coreference-Guided Mind-Map Generation) helpers
 CORE_GRAPH_SENTENCE_LIMIT = 48
@@ -164,6 +165,12 @@ def _insert_missing_commas(body: str) -> str:
         i += 1
 
     return "".join(chars)
+
+
+def _remove_invalid_control_chars(body: str) -> str:
+    if not body:
+        return body
+    return CONTROL_CHAR_RE.sub(" ", body)
 
 
 def _extract_sentences_from_segments(segments: list[str], limit: int = CORE_GRAPH_SENTENCE_LIMIT) -> list[dict]:
@@ -595,6 +602,7 @@ def extract_json_tree(raw: str) -> dict:
     # 2) Lấy block {...} lớn nhất
     m2 = re.search(r"(\{[\s\S]*\})", body, flags=re.S)
     body = m2.group(1) if m2 else body
+    body = _remove_invalid_control_chars(body)
 
     if not body.strip():
         raise ValueError("Empty JSON body")
@@ -605,6 +613,7 @@ def extract_json_tree(raw: str) -> dict:
     except json.JSONDecodeError:
         # Thử escape các dấu ngoặc kép chưa được escape trong nội dung
         escaped_body = _escape_inner_quotes(body)
+        escaped_body = _remove_invalid_control_chars(escaped_body)
         try:
             return json.loads(escaped_body)
         except json.JSONDecodeError:
@@ -612,6 +621,7 @@ def extract_json_tree(raw: str) -> dict:
 
         # Thử chèn dấu phẩy bị thiếu giữa các object liền kề
         fixed_commas = _insert_missing_commas(body)
+        fixed_commas = _remove_invalid_control_chars(fixed_commas)
         if fixed_commas != body:
             try:
                 return json.loads(fixed_commas)
@@ -635,6 +645,7 @@ def extract_json_tree(raw: str) -> dict:
                 continue
             lines.append(line)
         cleaned = "\n".join(lines)
+        cleaned = _remove_invalid_control_chars(cleaned)
         return json.loads(cleaned)
 
 
