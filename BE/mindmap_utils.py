@@ -36,7 +36,7 @@ def _escape_inner_quotes(body: str) -> str:
     result: list[str] = []
     inside_string = False
     escape = False
-    closers = {",", "}", "]", " ", "\n", "\r", "\t"}
+    closers = {",", "}", "]", ":", " ", "\n", "\r", "\t"}
     length = len(body)
 
     for idx, ch in enumerate(body):
@@ -63,6 +63,56 @@ def _escape_inner_quotes(body: str) -> str:
         result.append(ch)
 
     return "".join(result)
+
+
+def _insert_missing_commas(body: str) -> str:
+    """Try to insert commas between adjacent JSON objects/arrays when omitted."""
+    if not body:
+        return body
+
+    chars: list[str] = []
+    inside_string = False
+    escape = False
+    length = len(body)
+    i = 0
+
+    while i < length:
+        ch = body[i]
+        chars.append(ch)
+
+        if escape:
+            escape = False
+        elif ch == "\\":
+            escape = True
+        elif ch == "\"":
+            inside_string = not inside_string
+        elif not inside_string and ch in {"}", "]"}:
+            j = i + 1
+            while j < length and body[j].isspace():
+                j += 1
+            if j < length:
+                next_char = body[j]
+                next_lower = body[j:j + 5].lower()
+                starts_value = (
+                    next_char in {"{", "[", "\"", "-"}
+                    or next_char.isdigit()
+                    or next_lower.startswith("true")
+                    or next_lower.startswith("false")
+                    or next_lower.startswith("null")
+                )
+                if starts_value:
+                    whitespace_segment = body[i + 1:j]
+                    if "," not in whitespace_segment:
+                        k = len(chars) - 2
+                        while k >= 0 and chars[k].isspace():
+                            k -= 1
+                        prev_char = chars[k] if k >= 0 else ""
+                        if prev_char not in {"{", "[", ",", ":"}:
+                            chars.append(",")
+
+        i += 1
+
+    return "".join(chars)
 
 
 def _literal_eval_json(body: str):
@@ -105,6 +155,14 @@ def extract_json_tree(raw: str) -> dict:
             return json.loads(escaped_body)
         except json.JSONDecodeError:
             body = escaped_body
+
+        # Thử chèn dấu phẩy bị thiếu giữa các object liền kề
+        fixed_commas = _insert_missing_commas(body)
+        if fixed_commas != body:
+            try:
+                return json.loads(fixed_commas)
+            except json.JSONDecodeError:
+                body = fixed_commas
 
         # Thử literal eval (cho trường hợp dùng dấu nháy đơn, hoặc thiếu dấu phẩy nhỏ)
         literal_obj = _literal_eval_json(body)
