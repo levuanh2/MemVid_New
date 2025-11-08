@@ -329,20 +329,48 @@ def delete_source():
 def generate_mindmap():
     try:
         data = request.json or {}
-        sources = data.get("sources", [])
-        if not sources:
+        raw_sources = data.get("sources") or []
+        if not isinstance(raw_sources, list):
+            return jsonify({"error": "Sources phải là list"}), 400
+
+        source_names: list[str] = []
+        for item in raw_sources:
+            candidate = None
+            if isinstance(item, str):
+                candidate = item.strip()
+            elif isinstance(item, dict):
+                for key in ("video", "name", "id", "source", "title"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        candidate = value.strip()
+                        break
+            if candidate:
+                if candidate not in source_names:
+                    source_names.append(candidate)
+
+        if not source_names:
             return jsonify({"error": "No sources selected"}), 400
 
         strategy_requested = (data.get("strategy") or data.get("mode") or data.get("method") or "iterative").strip().lower()
 
-        root_title = Path(sources[0]).stem if sources else "Mind Map"
+        if len(source_names) == 1:
+            root_title = Path(source_names[0]).stem or "Mind Map"
+        else:
+            display_candidates = [Path(name).stem for name in source_names if Path(name).stem]
+            if not display_candidates:
+                root_title = "Mind Map tổng hợp"
+            else:
+                preview = ", ".join(display_candidates[:3])
+                if len(display_candidates) > 3:
+                    preview += f" + {len(display_candidates) - 3} nguồn"
+                root_title = f"Tổng hợp: {preview}"
 
         with open("index/index.json", encoding="utf-8") as f:
             meta = json.load(f)
 
         normalized_sources = [
             unicodedata.normalize('NFKD', s.strip()).replace('\u00a0', '').replace('.mp4', '').lower()
-            for s in sources
+            for s in source_names
         ]
 
         # chọn chunks thuộc sources được chọn
@@ -382,7 +410,7 @@ def generate_mindmap():
             "id": str(uuid.uuid4()),
             "title": root_title,
             "nodes": flat_nodes,
-            "sources": sources,
+            "sources": source_names,
             "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "strategy": strategy_used,
         }
